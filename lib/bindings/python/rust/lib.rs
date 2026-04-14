@@ -267,7 +267,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, self_host_metadata=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, self_host_metadata=None, max_gpu_lora_count=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -287,6 +287,7 @@ fn register_model<'p>(
     lora_name: Option<&str>,
     base_model_path: Option<&str>,
     self_host_metadata: Option<bool>,
+    max_gpu_lora_count: Option<u32>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
     if model_type.inner == llm_rs::model_type::ModelType::Prefill
@@ -422,7 +423,7 @@ fn register_model<'p>(
             .as_ref()
             .map(|name| llm_rs::model_card::LoraInfo {
                 name: name.clone(),
-                max_gpu_lora_count: None,
+                max_gpu_lora_count,
             });
 
         local_model
