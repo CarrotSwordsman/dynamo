@@ -24,11 +24,26 @@ WORKDIR /workspace
 
 ENV DYNAMO_HOME=/opt/dynamo
 ENV HOME=/home/dynamo
+{% if device != "cuda" %}
+ENV PATH=/usr/local/ucx/bin:/usr/local/bin/etcd:${PATH}
+{% else %}
 ENV PATH=/usr/local/bin/etcd:${PATH}
+{% endif %}
 
-{% if device == "cpu" %}
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+{% if device != "cuda" %}
+ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
+{% if device == "xpu" %}
+ENV NIXL_PREFIX=/opt/intel/intel_nixl
+ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
+{% elif device == "cpu" %}
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
+{% endif %}
+ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:\
+    /usr/local/ucx/lib:/usr/local/ucx/lib/ucx:\
+    ${TORCH_LIB_DIR}:${LD_LIBRARY_PATH:-}
 {% endif %}
 
 # Install NATS and ETCD
@@ -46,6 +61,20 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && mkdir -p /etc/profile.d \
     && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
+{% if device != "cuda" %}
+# Copy UCX and NIXL from wheel_builder for CPU/XPU devices
+# (CUDA devices use NIXL from upstream vLLM wheels)
+COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo:0 --from=wheel_builder ${NIXL_PREFIX} ${NIXL_PREFIX}
+{% if device == "xpu" %}
+# XPU NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated
+COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+{% endif %}
+# Copy NIXL Python wheels
+COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+{% endif %}
+
 # Copy attribution files and wheels
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
@@ -54,6 +83,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 # Keep the upstream Python solve intact: install only Dynamo-owned wheels and
 # suppress transitive dependency resolution unless a later validation proves a
 # missing package must be added explicitly.
+{% if device == "cuda" %}
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install --system --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
@@ -66,6 +96,19 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then uv pip install --system --no-deps "$GMS_WHEEL"; fi; \
     fi
+{% else %}
+# CPU/XPU: Use virtual environment (not system Python)
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip install \
+      /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+      /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+      /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "${ENABLE_KVBM}" = "true" ]; then \
+        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
+        if [ -n "$KVBM_WHEEL" ]; then uv pip install "$KVBM_WHEEL"; fi; \
+    fi
+{% endif %}
 
 {% if device == "cuda" %}
 # vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
