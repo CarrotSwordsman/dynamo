@@ -893,6 +893,43 @@ func TestGenerateDynamoComponentsDeployments_PropagatesPreservedAlphaServiceAnno
 	assert.Equal(t, "nginx", ptr.Deref(ingressSpec.IngressControllerClassName, ""))
 }
 
+func TestGenerateDynamoComponentsDeployments_AddsTopologyLabelAnnotationToWorkers(t *testing.T) {
+	labelKey := "topology.kubernetes.io/zone"
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
+			},
+			Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+				KvTransferPolicy: &v1beta1.KvTransferPolicy{
+					LabelKey:    labelKey,
+					Domain:      "zone",
+					Enforcement: v1beta1.KvTransferEnforcementRequired,
+				},
+			},
+		},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+	require.NoError(t, err)
+
+	worker := dcds["worker"]
+	require.NotNil(t, worker)
+	assert.Equal(t, labelKey, worker.Annotations[commonconsts.KubeAnnotationTopologyLabelKey])
+	assert.Equal(t, labelKey, GetDCDKubeAnnotations(worker)[commonconsts.KubeAnnotationTopologyLabelKey])
+
+	frontend := dcds["frontend"]
+	require.NotNil(t, frontend)
+	assert.NotContains(t, frontend.Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+	assert.NotContains(t, GetDCDKubeAnnotations(frontend), commonconsts.KubeAnnotationTopologyLabelKey)
+}
+
 func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *testing.T) {
 	alpha := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
