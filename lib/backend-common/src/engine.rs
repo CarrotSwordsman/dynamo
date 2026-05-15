@@ -10,6 +10,7 @@
 //! Object-safety: every instance method takes `&self`. `Arc<dyn LLMEngine>` is
 //! the handle `Worker` drives the lifecycle through.
 
+use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ use futures::stream::BoxStream;
 use tokio::sync::watch;
 
 use crate::error::DynamoError;
+use crate::schema::Capability;
 
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
 pub use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
@@ -134,6 +136,10 @@ pub struct EngineConfig {
     pub bootstrap_host: Option<String>,
     /// Bootstrap port for disaggregated KV transfer. See `bootstrap_host`.
     pub bootstrap_port: Option<u16>,
+    /// Forwarded-field capabilities the engine consumes. A `Forwarded`
+    /// request field passes [`crate::schema::check_request`] only if
+    /// its matching [`Capability`] variant is declared here.
+    pub capabilities: HashSet<Capability>,
 }
 
 /// Inference engine trait.

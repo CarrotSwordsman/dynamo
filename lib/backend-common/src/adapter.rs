@@ -7,6 +7,7 @@
 //! Decode-mode disagg defers `engine.abort()` until the first chunk to
 //! avoid orphaning the prefill peer's NIXL KV transfer.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -24,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::disagg::DisaggregationMode;
 use crate::engine::{GenerateContext, LLMEngine};
+use crate::schema::{Capability, UnsupportedFieldPolicy, check_request};
 
 /// Cancels its token on Drop so the monitor task exits cleanly when the
 /// response stream is gone.
@@ -40,11 +42,24 @@ impl Drop for CancelMonitorGuard {
 pub(crate) struct EngineAdapter {
     engine: Arc<dyn LLMEngine>,
     mode: DisaggregationMode,
+    /// Capabilities and policy threaded to [`check_request`].
+    capabilities: HashSet<Capability>,
+    policy: UnsupportedFieldPolicy,
 }
 
 impl EngineAdapter {
-    pub(crate) fn new(engine: Arc<dyn LLMEngine>, mode: DisaggregationMode) -> Self {
-        Self { engine, mode }
+    pub(crate) fn new(
+        engine: Arc<dyn LLMEngine>,
+        mode: DisaggregationMode,
+        capabilities: HashSet<Capability>,
+        policy: UnsupportedFieldPolicy,
+    ) -> Self {
+        Self {
+            engine,
+            mode,
+            capabilities,
+            policy,
+        }
     }
 }
 
@@ -58,6 +73,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
+
+        // Gate Forwarded fields before delegating, so misuse surfaces at
+        // the door rather than as a silently degraded response.
+        check_request(&request, self.policy, &self.capabilities).map_err(Error::from)?;
 
         // Decode workers defer engine.abort() until first-token to protect
         // in-flight NIXL transfers. The Sender goes to the engine (via
@@ -187,6 +206,13 @@ mod tests {
     use futures::stream::BoxStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Test helper: adapter with no capabilities and Ignore policy so
+    /// existing tests don't trip the schema check. Schema-enforcement
+    /// tests build the adapter directly.
+    fn mk_adapter(engine: Arc<dyn LLMEngine>, mode: DisaggregationMode) -> EngineAdapter {
+        EngineAdapter::new(engine, mode, HashSet::new(), UnsupportedFieldPolicy::Ignore)
+    }
+
     /// Mock engine: yields a canned list of chunks with a per-chunk delay, and
     /// records how many times `abort` is called.
     struct MockEngine {
@@ -265,7 +291,7 @@ mod tests {
                 .with_tokens(vec![22])
                 .with_usage(usage(3, 2)),
         ]);
-        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+        let adapter = mk_adapter(engine, DisaggregationMode::Aggregated);
 
         let input = Context::new(make_request(vec![1, 2, 3]));
         let stream = adapter.generate(input).await.unwrap();
@@ -295,7 +321,7 @@ mod tests {
             setup_err: None,
         });
         let abort_ct = engine.abort_calls.clone();
-        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+        let adapter = mk_adapter(engine, DisaggregationMode::Aggregated);
 
         let input: Context<PreprocessedRequest> = Context::new(make_request(vec![1]));
         let ctrl = input.context();
@@ -337,7 +363,7 @@ mod tests {
                     .build()
             }),
         });
-        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+        let adapter = mk_adapter(engine, DisaggregationMode::Aggregated);
 
         let input = Context::new(make_request(vec![1]));
         let err = adapter.generate(input).await.unwrap_err();
@@ -378,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_forwards_terminal_cancel_chunk_to_downstream() {
-        let adapter = EngineAdapter::new(
+        let adapter = mk_adapter(
             Arc::new(TerminalOnCancelEngine),
             DisaggregationMode::Aggregated,
         );
@@ -415,7 +441,7 @@ mod tests {
                     .build()
             }),
         });
-        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+        let adapter = mk_adapter(engine, DisaggregationMode::Aggregated);
 
         let input = Context::new(make_request(vec![1]));
         let err = adapter.generate(input).await.unwrap_err();
@@ -454,7 +480,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_forwards_typed_mid_stream_error_as_annotated_error() {
-        let adapter = EngineAdapter::new(
+        let adapter = mk_adapter(
             Arc::new(TypedMidStreamErrEngine),
             DisaggregationMode::Aggregated,
         );
@@ -538,7 +564,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn decode_defers_abort_until_first_chunk() {
         let (engine, release, abort_calls) = ParkedEngine::new();
-        let adapter = EngineAdapter::new(engine, DisaggregationMode::Decode);
+        let adapter = mk_adapter(engine, DisaggregationMode::Decode);
 
         let input: Context<PreprocessedRequest> = Context::new(make_request(vec![1]));
         let ctrl = input.context();
@@ -569,7 +595,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn aggregated_fires_abort_immediately() {
         let (engine, release, abort_calls) = ParkedEngine::new();
-        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+        let adapter = mk_adapter(engine, DisaggregationMode::Aggregated);
 
         let input: Context<PreprocessedRequest> = Context::new(make_request(vec![1]));
         let ctrl = input.context();
@@ -630,7 +656,7 @@ mod tests {
             release: release.clone(),
             abort_calls: abort_calls.clone(),
         });
-        let adapter = EngineAdapter::new(engine, DisaggregationMode::Decode);
+        let adapter = mk_adapter(engine, DisaggregationMode::Decode);
 
         let input: Context<PreprocessedRequest> = Context::new(make_request(vec![1]));
         let ctrl = input.context();
@@ -653,7 +679,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn decode_stream_drop_without_first_token_does_not_abort() {
         let (engine, _release, abort_calls) = ParkedEngine::new();
-        let adapter = EngineAdapter::new(engine, DisaggregationMode::Decode);
+        let adapter = mk_adapter(engine, DisaggregationMode::Decode);
 
         let input: Context<PreprocessedRequest> = Context::new(make_request(vec![1]));
         let ctrl = input.context();
@@ -668,5 +694,88 @@ mod tests {
             0,
             "stream drop before first-token must not fire engine.abort"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Schema enforcement (Forwarded-field gating).
+    // -------------------------------------------------------------------
+
+    /// Build a request with `prompt_embeds` set — a `Forwarded` field
+    /// that no engine consumes by default — so we can exercise the
+    /// schema check.
+    fn make_request_with_prompt_embeds() -> PreprocessedRequest {
+        let mut req = make_request(vec![1, 2, 3]);
+        req.prompt_embeds = Some("base64-tensor".to_string());
+        req
+    }
+
+    #[tokio::test]
+    async fn schema_reject_blocks_forwarded_field_without_capability() {
+        let (engine, _) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::stop()]);
+        let adapter = EngineAdapter::new(
+            engine,
+            DisaggregationMode::Aggregated,
+            HashSet::new(),
+            UnsupportedFieldPolicy::Reject,
+        );
+        let input = Context::new(make_request_with_prompt_embeds());
+        let err = adapter
+            .generate(input)
+            .await
+            .expect_err("Reject policy must reject the unsupported field");
+        let msg = err.to_string();
+        assert!(msg.contains("prompt_embeds"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn schema_warn_allows_forwarded_field_through() {
+        let (engine, _) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::stop()]);
+        let adapter = EngineAdapter::new(
+            engine,
+            DisaggregationMode::Aggregated,
+            HashSet::new(),
+            UnsupportedFieldPolicy::Warn,
+        );
+        let input = Context::new(make_request_with_prompt_embeds());
+        let stream = adapter
+            .generate(input)
+            .await
+            .expect("Warn policy must pass the request through");
+        let collected: Vec<_> = stream.collect().await;
+        assert!(!collected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn schema_declared_capability_allows_forwarded_field() {
+        let (engine, _) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::stop()]);
+        let caps: HashSet<Capability> = [Capability::PromptEmbeds].into_iter().collect();
+        let adapter = EngineAdapter::new(
+            engine,
+            DisaggregationMode::Aggregated,
+            caps,
+            UnsupportedFieldPolicy::Reject,
+        );
+        let input = Context::new(make_request_with_prompt_embeds());
+        let stream = adapter
+            .generate(input)
+            .await
+            .expect("declared capability must allow the field even under Reject");
+        let _ = stream.collect::<Vec<_>>().await;
+    }
+
+    #[tokio::test]
+    async fn schema_ignore_policy_is_a_passthrough() {
+        let (engine, _) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::stop()]);
+        let adapter = EngineAdapter::new(
+            engine,
+            DisaggregationMode::Aggregated,
+            HashSet::new(),
+            UnsupportedFieldPolicy::Ignore,
+        );
+        let input = Context::new(make_request_with_prompt_embeds());
+        adapter
+            .generate(input)
+            .await
+            .expect("Ignore policy must pass the request through");
     }
 }

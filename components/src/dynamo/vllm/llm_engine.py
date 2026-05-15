@@ -47,7 +47,7 @@ from dynamo.vllm.cache_info import (
     get_configured_kv_event_block_size,
 )
 
-from .handlers import build_sampling_params, get_dp_range_for_worker
+from .handlers import build_sampling_params, extract_logprobs, get_dp_range_for_worker
 
 logger = logging.getLogger(__name__)
 
@@ -310,6 +310,17 @@ class VllmLLMEngine(LLMEngine):
                     "index": output_idx,
                     "token_ids": output.token_ids[previous_total:],
                 }
+
+                # vLLM pre-decodes top-k strings on CompletionOutput so we
+                # don't need a tokenizer here.
+                log_probs, top_logprobs = extract_logprobs(output, previous_total)
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
+                cum_logprob = getattr(output, "cumulative_logprob", None)
+                if cum_logprob is not None:
+                    out["cum_log_probs"] = float(cum_logprob)
 
                 if output.finish_reason:
                     out["finish_reason"] = str(output.finish_reason)

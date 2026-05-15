@@ -42,6 +42,7 @@ from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import ModelInput
+from dynamo.common.backend.sglang_logprobs import build_logprob_kwargs, extract_logprobs
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import compute_bootstrap_address, warmup_prefill_engine
 from dynamo.sglang.args import parse_args
@@ -241,6 +242,10 @@ class SglangLLMEngine(LLMEngine):
 
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
+        logprob_kwargs = build_logprob_kwargs(dict(request))
+        return_tokens_as_token_ids = bool(
+            (request.get("output_options") or {}).get("return_tokens_as_token_ids", False)
+        )
 
         # SGLang disagg keys NIXL transport on a (host, port, room) triple
         # exchanged between prefill and decode peers.
@@ -265,6 +270,7 @@ class SglangLLMEngine(LLMEngine):
             stream=True,
             rid=context.trace_id,
             data_parallel_rank=sgl_dp_rank,
+            **logprob_kwargs,
             **bootstrap_kwargs,
         )
 
@@ -290,6 +296,9 @@ class SglangLLMEngine(LLMEngine):
             self._prefill_consume_tasks.add(task)
             task.add_done_callback(self._prefill_consume_tasks.discard)
             return
+
+        # SGLang meta_info logprob arrays are cumulative; track per-index offset.
+        num_logprobs_so_far: dict[int, int] = {}
 
         async for res in stream:
             # SGLang sets index when n>1; default to 0 otherwise.
@@ -318,6 +327,17 @@ class SglangLLMEngine(LLMEngine):
 
             out["token_ids"] = output_ids
 
+            log_probs, top_logprobs, new_total = extract_logprobs(
+                meta_info,
+                num_logprobs_so_far.get(output_idx, 0),
+                return_tokens_as_token_ids=return_tokens_as_token_ids,
+            )
+            if log_probs is not None:
+                out["log_probs"] = log_probs
+            if top_logprobs is not None:
+                out["top_logprobs"] = top_logprobs
+            num_logprobs_so_far[output_idx] = new_total
+
             if finish_reason:
                 prompt_tokens = meta_info["prompt_tokens"]
                 completion_tokens = meta_info["completion_tokens"]
@@ -331,7 +351,7 @@ class SglangLLMEngine(LLMEngine):
             if context.is_stopped():
                 prompt_tokens = meta_info.get("prompt_tokens", 0)
                 completion_tokens = meta_info.get("completion_tokens", 0)
-                yield {
+                cancelled: GenerateChunk = {
                     "token_ids": output_ids,
                     "index": output_idx,
                     "finish_reason": "cancelled",
@@ -341,6 +361,11 @@ class SglangLLMEngine(LLMEngine):
                         "total_tokens": prompt_tokens + completion_tokens,
                     },
                 }
+                if log_probs is not None:
+                    cancelled["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    cancelled["top_logprobs"] = top_logprobs
+                yield cancelled
                 break
 
             yield out

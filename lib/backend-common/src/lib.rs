@@ -19,6 +19,7 @@ pub mod engine;
 pub mod error;
 mod publisher;
 pub mod run;
+pub mod schema;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 #[cfg(debug_assertions)]
@@ -35,4 +36,5 @@ pub use engine::{
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use run::run;
+pub use schema::{Capability, UnsupportedFieldPolicy, check_request, list_request_fields};
 pub use worker::{RuntimeConfig, Worker, WorkerConfig};
