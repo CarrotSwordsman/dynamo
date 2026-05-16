@@ -21,8 +21,8 @@ use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, BackendError, Capability as RsCapability,
     DisaggregationMode as RsDisaggregationMode, DynamoError, EngineConfig as RsEngineConfig,
-    ErrorType, KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput,
-    Metrics as RsMetrics, MetricsSource as RsMetricsSource, OnPublisherReady, PreprocessedRequest,
+    ErrorType, KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput, Metrics as RsMetrics,
+    MetricsSource as RsMetricsSource, OnPublisherReady, PreprocessedRequest,
     RuntimeConfig as RsRuntimeConfig, SnapshotFn,
     UnsupportedFieldPolicy as RsUnsupportedFieldPolicy, Worker as RsWorker,
     WorkerConfig as RsWorkerConfig, list_request_fields as rs_list_request_fields,
@@ -78,7 +78,14 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
 // Capability — mirror of `dynamo_backend_common::schema::Capability`.
 // ---------------------------------------------------------------------------
 
-#[pyclass(module = "dynamo._core.backend", name = "Capability", eq, eq_int, hash, frozen)]
+#[pyclass(
+    module = "dynamo._core.backend",
+    name = "Capability",
+    eq,
+    eq_int,
+    hash,
+    frozen
+)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Capability {
     PromptEmbeds = 1,
