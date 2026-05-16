@@ -173,7 +173,6 @@ RUN uv pip uninstall -y triton && \
 {% endif %}
 
 {% endif %}
-{% endif %}
 
 {% if context.vllm.enable_media_ffmpeg == "true" %}
 # Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
