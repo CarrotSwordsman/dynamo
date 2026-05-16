@@ -2369,6 +2369,24 @@ class backend:
         Prefill: "backend.DisaggregationMode"
         Decode: "backend.DisaggregationMode"
 
+    class Capability:
+        # Mirrors `dynamo_backend_common::schema::Capability`. Engines declare
+        # which `Forwarded` PreprocessedRequest fields they consume.
+        PromptEmbeds: "backend.Capability"
+        MultiModalData: "backend.Capability"
+        MmRoutingInfo: "backend.Capability"
+        MmProcessorKwargs: "backend.Capability"
+        RouterConfigOverride: "backend.Capability"
+        AgentContext: "backend.Capability"
+        ExtraArgs: "backend.Capability"
+
+    class UnsupportedFieldPolicy:
+        # Mirrors `dynamo_backend_common::schema::UnsupportedFieldPolicy`.
+        # Operator-controlled gate behavior for unsupported forwarded fields.
+        Reject: "backend.UnsupportedFieldPolicy"
+        Warn: "backend.UnsupportedFieldPolicy"
+        Ignore: "backend.UnsupportedFieldPolicy"
+
     class EngineConfig:
         def __init__(
             self,
@@ -2383,6 +2401,7 @@ class backend:
             data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
+            capabilities: Optional[List["backend.Capability"]] = None,
         ) -> None: ...
         @property
         def model(self) -> str: ...
@@ -2406,6 +2425,8 @@ class backend:
         def bootstrap_host(self) -> Optional[str]: ...
         @property
         def bootstrap_port(self) -> Optional[int]: ...
+        @property
+        def capabilities(self) -> List["backend.Capability"]: ...
 
     class RuntimeConfig:
         def __init__(
@@ -2434,7 +2455,10 @@ class backend:
             metrics_labels: List[Tuple[str, str]] = ...,
             runtime: Optional["backend.RuntimeConfig"] = None,
             disaggregation_mode: "backend.DisaggregationMode" = ...,
+            unsupported_field_policy: "backend.UnsupportedFieldPolicy" = ...,
         ) -> None: ...
+        @property
+        def unsupported_field_policy(self) -> "backend.UnsupportedFieldPolicy": ...
 
     class Worker:
         def __init__(
@@ -2444,3 +2468,5 @@ class backend:
             event_loop: Any,
         ) -> None: ...
         def run(self) -> Awaitable[None]: ...
+
+    def list_request_fields() -> List[Tuple[str, str]]: ...

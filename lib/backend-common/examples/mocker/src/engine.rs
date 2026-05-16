@@ -290,6 +290,7 @@ impl LLMEngine for MockerBackend {
             // start() to publish ModelRuntimeConfig.disaggregated_endpoint.
             bootstrap_host: None,
             bootstrap_port: None,
+            capabilities: Default::default(),
         })
     }
 

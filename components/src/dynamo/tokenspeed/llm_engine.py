@@ -19,10 +19,10 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
 )
+from dynamo.common.backend.sglang_logprobs import build_logprob_kwargs, extract_logprobs
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm import ModelInput
-from dynamo.common.backend.sglang_logprobs import build_logprob_kwargs, extract_logprobs
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.tokenspeed.args import parse_args
 
@@ -106,7 +106,9 @@ class TokenspeedLLMEngine(LLMEngine):
         logprob_kwargs = build_logprob_kwargs(dict(request))
         token_ids = request.get("token_ids", [])
         return_tokens_as_token_ids = bool(
-            (request.get("output_options") or {}).get("return_tokens_as_token_ids", False)
+            (request.get("output_options") or {}).get(
+                "return_tokens_as_token_ids", False
+            )
         )
         obj = _generate_req_input_cls()(
             input_ids=token_ids,
