@@ -239,7 +239,7 @@ async def test_client_context_cancel(temp_file_store, server, client):
 @pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
-async def test_client_context_cancel_preserves_metadata(
+async def test_client_context_cancel_preserves_metadata_baseten(
     temp_file_store, server, client
 ):
     _, handler = server
