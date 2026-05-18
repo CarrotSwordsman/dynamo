@@ -45,6 +45,8 @@ class MockServer:
         Checks for context.is_stopped() / context.is_killed() before each yield and raises
         CancelledError if stopped / killed.
         """
+        include_metadata = request == "_generate_until_context_cancelled_with_metadata"
+
         for i in range(1000):
             print(f"Processing iteration {i}")
 
@@ -64,7 +66,10 @@ class MockServer:
 
             await asyncio.sleep(0.1)
             print(f"Sending iteration {i}")
-            yield i
+            if include_metadata:
+                yield {"i": i, "metadata": dict(context.metadata.items())}
+            else:
+                yield i
 
         assert (
             False
