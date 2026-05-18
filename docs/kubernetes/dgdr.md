@@ -50,7 +50,7 @@ spec:
 | Field | Required | Default | Purpose |
 |---|---|---|---|
 | `model` | Yes | — | HuggingFace model ID (e.g. `Qwen/Qwen3-0.6B`) |
-| `image` | No | — | Container image for the profiling job. For current releases, use `dynamo-planner`. |
+| `image` | No | — | Container image for the profiling job. Dynamo >= 1.1.0: use `dynamo-planner`; earlier versions: use `dynamo-frontend`. |
 | `backend` | No | `auto` | Inference engine: `auto`, `vllm`, `sglang`, `trtllm` |
 | `searchStrategy` | No | `rapid` | Profiling depth: `rapid` (AIC simulation, ~30s) or `thorough` (real GPU, 2–4h) |
 | `autoApply` | No | `true` | Automatically deploy the profiler's recommended config |
