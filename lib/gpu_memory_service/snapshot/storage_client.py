@@ -12,8 +12,12 @@ import os
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from gpu_memory_service.snapshot.backends.nixl_ucx import (
+    NIXL_UCX_REMOTE_METADATA_CONFIG_KEY,
+    load_remote_peer_metadata,
+)
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
     SHARDED_SSD_ROOTS_CONFIG_KEY,
 )
@@ -39,9 +43,11 @@ from gpu_memory_service.snapshot.transfer import (
     DEFAULT_TRANSFER_BACKEND as _DEFAULT_TRANSFER_BACKEND,
 )
 from gpu_memory_service.snapshot.transfer import (
+    NIXL_UCX_TRANSFER_BACKEND,
     GMSSnapshotConfig,
     GMSTransferTarget,
     build_file_transfer_sources,
+    build_remote_transfer_sources,
     create_transfer_backend,
 )
 
@@ -343,20 +349,38 @@ class GMSStorageClient:
         max_workers: int = 4,
         clear_existing: bool = True,
         transfer_backend: Optional[str] = None,
+        remote_peer_metadata: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, str]:
         backend_name = transfer_backend or self._transfer_backend
         self._validate_load_request()
 
         manifest, saved_metadata = _load_manifest_and_metadata(input_dir)
-        sources = build_file_transfer_sources(input_dir, manifest.allocations)
+        backend_config = {
+            SHARDED_SSD_ROOTS_CONFIG_KEY: self._sharded_ssd_roots,
+        }
+        if backend_name == NIXL_UCX_TRANSFER_BACKEND:
+            peer_metadata = load_remote_peer_metadata(remote_peer_metadata or {})
+            if peer_metadata.get("sources") is None:
+                raise RuntimeError(
+                    f"{NIXL_UCX_TRANSFER_BACKEND} requires remote peer sources"
+                )
+            remote_agent = peer_metadata.get("agent_name") or ""
+            backend_config[NIXL_UCX_REMOTE_METADATA_CONFIG_KEY] = peer_metadata[
+                "metadata"
+            ]
+            sources = build_remote_transfer_sources(
+                manifest.allocations,
+                peer_metadata["sources"],
+                remote_agent=remote_agent,
+            )
+        else:
+            sources = build_file_transfer_sources(input_dir, manifest.allocations)
         backend = create_transfer_backend(
             backend_name,
             GMSSnapshotConfig(
                 device=self.device,
                 max_workers=max_workers,
-                backend_config={
-                    SHARDED_SSD_ROOTS_CONFIG_KEY: self._sharded_ssd_roots,
-                },
+                backend_config=backend_config,
             ),
         )
         session = None

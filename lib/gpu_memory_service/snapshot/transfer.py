@@ -15,11 +15,13 @@ from gpu_memory_service.snapshot.model import AllocationEntry
 DEFAULT_TRANSFER_BACKEND = "nixl"
 NIXL_TRANSFER_BACKEND = "nixl"
 NIXL_GDS_TRANSFER_BACKEND = "nixl-gds"
+NIXL_UCX_TRANSFER_BACKEND = "nixl-ucx"
 SHARDED_SSD_TRANSFER_BACKEND = "sharded-ssd"
 
 TRANSFER_BACKEND_CHOICES = (
     NIXL_TRANSFER_BACKEND,
     NIXL_GDS_TRANSFER_BACKEND,
+    NIXL_UCX_TRANSFER_BACKEND,
     SHARDED_SSD_TRANSFER_BACKEND,
 )
 
@@ -32,6 +34,20 @@ class FileTransferSource:
     file_path: str
     file_offset: int
     byte_count: int
+
+
+@dataclass(frozen=True)
+class RemoteTransferSource:
+    """One source extent in a remote NIXL agent's memory."""
+
+    allocation_id: str
+    remote_agent: str
+    va: int
+    device: int
+    byte_count: int
+
+
+TransferSource = FileTransferSource | RemoteTransferSource
 
 
 @dataclass(frozen=True)
@@ -73,7 +89,7 @@ class TransferBackend(Protocol):
 
     name: str
 
-    def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
+    def start_restore(self, sources: Sequence[TransferSource]) -> TransferSession:
         """Start or stage restore work for the given sources."""
 
     def close(self) -> None:
@@ -96,6 +112,43 @@ def build_file_transfer_sources(
     ]
 
 
+def build_remote_transfer_sources(
+    allocations: Sequence[AllocationEntry],
+    peer_sources: Mapping[str, Mapping[str, Any]],
+    *,
+    remote_agent: str,
+) -> List[RemoteTransferSource]:
+    """Convert manifest allocation placement into remote-memory extents."""
+    sources: List[RemoteTransferSource] = []
+    for entry in allocations:
+        source = peer_sources.get(entry.allocation_id)
+        if source is None:
+            raise RuntimeError(
+                f"Missing UCX source metadata for allocation {entry.allocation_id}"
+            )
+        byte_count = int(source.get("byte_count", entry.aligned_size))
+        if byte_count != int(entry.aligned_size):
+            raise RuntimeError(
+                f"UCX source size mismatch for allocation {entry.allocation_id}: "
+                f"manifest={entry.aligned_size} source={byte_count}"
+            )
+        source_agent = str(source.get("remote_agent") or remote_agent)
+        try:
+            va = source["va"]
+        except KeyError:
+            va = source["addr"]
+        sources.append(
+            RemoteTransferSource(
+                allocation_id=entry.allocation_id,
+                remote_agent=source_agent,
+                va=int(va),
+                device=int(source.get("device", 0)),
+                byte_count=byte_count,
+            )
+        )
+    return sources
+
+
 def create_transfer_backend(
     name: str,
     config: GMSSnapshotConfig,
@@ -111,6 +164,11 @@ def create_transfer_backend(
 
         return NixlGDSTransferBackend(config=config)
 
+    if name == NIXL_UCX_TRANSFER_BACKEND:
+        from gpu_memory_service.snapshot.backends.nixl_ucx import NixlUCXTransferBackend
+
+        return NixlUCXTransferBackend(config=config)
+
     if name == SHARDED_SSD_TRANSFER_BACKEND:
         from gpu_memory_service.snapshot.backends.sharded_ssd import (
             ShardedSSDTransferBackend,
@@ -125,7 +183,7 @@ def create_transfer_backend(
 
 
 def validate_transfer_targets(
-    sources: Sequence[FileTransferSource],
+    sources: Sequence[TransferSource],
     targets: Mapping[str, GMSTransferTarget],
     *,
     device: Optional[int] = None,
