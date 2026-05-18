@@ -3,10 +3,13 @@
 
 use super::*;
 
+use crate::engine::{AsyncEngineContext, ResponseStream};
 use crate::metrics::prometheus_names::work_handler;
 use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
 };
+use crate::pipeline::ManyIn;
+use crate::pipeline::context::Controller;
 use crate::protocols::maybe_error::MaybeError;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
@@ -398,6 +401,305 @@ where
 
         // Ensure the metrics guard is not dropped until the end of the function.
         // Drop fires "request completed" log via RAII.
+        drop(_inflight_guard);
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<T, U> PushWorkHandler for crate::pipeline::network::BidirectionalIngress<T, U>
+where
+    T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
+    U: Data + Serialize + MaybeError + std::fmt::Debug,
+{
+    fn add_metrics(
+        &self,
+        endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        crate::pipeline::network::BidirectionalIngress::add_metrics(self, endpoint, metrics_labels)
+    }
+
+    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
+        self.endpoint_health_check_notifier
+            .set(notifier)
+            .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
+        Ok(())
+    }
+
+    async fn handle_payload(
+        &self,
+        payload: Bytes,
+        request_id: Option<String>,
+    ) -> Result<(), PipelineError> {
+        let t2_wallclock_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let start_time = std::time::Instant::now();
+
+        let _inflight_guard = self.metrics().map(|m| {
+            m.request_counter.inc();
+            m.inflight_requests.inc();
+            m.request_bytes.inc_by(payload.len() as u64);
+            if let Some(rid) = &request_id {
+                tracing::info!(request_id = %rid, "bidirectional request received");
+            }
+            RequestMetricsGuard {
+                inflight_requests: m.inflight_requests.clone(),
+                request_duration: m.request_duration.clone(),
+                start_time,
+                request_id: request_id.clone(),
+            }
+        });
+
+        // Decode the control message + first frame.
+        let msg = TwoPartCodec::default()
+            .decode_message(payload)?
+            .into_message_type();
+
+        let (control_msg, first_frame) = match msg {
+            TwoPartMessageType::HeaderAndData(header, data) => {
+                let control_msg: RequestControlMessage =
+                    serde_json::from_slice(&header).map_err(|err| {
+                        let json_str = String::from_utf8_lossy(&header);
+                        if let Some(m) = self.metrics() {
+                            m.error_counter
+                                .with_label_values(&[work_handler::error_types::DESERIALIZATION])
+                                .inc();
+                        }
+                        PipelineError::DeserializationError(format!(
+                            "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}"
+                        ))
+                    })?;
+                let first_frame: T = serde_json::from_slice(&data)?;
+                (control_msg, first_frame)
+            }
+            _ => {
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
+                        .inc();
+                }
+                return Err(PipelineError::Generic(String::from(
+                    "Unexpected message from work queue; unable extract a TwoPartMessage with a header and data",
+                )));
+            }
+        };
+
+        if !matches!(control_msg.request_type, RequestType::ManyIn) {
+            if let Some(m) = self.metrics() {
+                m.error_counter
+                    .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
+                    .inc();
+            }
+            return Err(PipelineError::Generic(String::from(
+                "bidirectional engine received a non-ManyIn request envelope",
+            )));
+        }
+
+        let req_stream_conn_info = control_msg
+            .request_stream_connection_info
+            .clone()
+            .ok_or_else(|| {
+                PipelineError::Generic(String::from(
+                    "bidirectional control message missing request_stream_connection_info",
+                ))
+            })?;
+
+        if let Some(t1_ns) = control_msg.frontend_send_ts_ns {
+            let transit_ns = t2_wallclock_ns.saturating_sub(t1_ns);
+            WORK_HANDLER_NETWORK_TRANSIT_SECONDS.observe(transit_ns as f64 / 1_000_000_000.0);
+        }
+
+        // Build the shared engine context — same id on both halves.
+        let context_arc: Arc<dyn AsyncEngineContext> =
+            Arc::new(Controller::new(control_msg.id.clone()));
+
+        // Open the response stream (worker → upstream).
+        let mut publisher = tcp::client::TcpClient::create_response_stream(
+            context_arc.clone(),
+            control_msg.connection_info,
+            self.metrics().map(|m| m.cancellation_total.clone()),
+        )
+        .await
+        .map_err(|e| {
+            if let Some(m) = self.metrics() {
+                m.error_counter
+                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                    .inc();
+            }
+            PipelineError::Generic(format!("Failed to create response stream: {:?}", e))
+        })?;
+
+        // Open the request stream (upstream → worker).
+        let request_stream_recv = tcp::client::TcpClient::create_request_stream(
+            context_arc.clone(),
+            req_stream_conn_info,
+            None,
+        )
+        .await
+        .map_err(|e| {
+            if let Some(m) = self.metrics() {
+                m.error_counter
+                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                    .inc();
+            }
+            PipelineError::Generic(format!("Failed to create request stream: {:?}", e))
+        })?;
+
+        // Forwarder: deserialize raw bytes off the request socket into `T`
+        // and feed the engine's `ManyIn<T>` input. Seed with the first frame
+        // we already decoded from the control envelope.
+        let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<T>(8);
+        if frame_tx.send(first_frame).await.is_err() {
+            return Err(PipelineError::Generic(String::from(
+                "engine input receiver dropped before first frame could be sent",
+            )));
+        }
+        let forwarder_ctx = context_arc.clone();
+        tokio::spawn(async move {
+            let mut rx = request_stream_recv.rx;
+            while let Some(bytes) = rx.recv().await {
+                if forwarder_ctx.is_killed() {
+                    break;
+                }
+                match serde_json::from_slice::<T>(&bytes) {
+                    Ok(item) => {
+                        if frame_tx.send(item).await.is_err() {
+                            tracing::debug!(
+                                "engine consumer dropped; bidirectional input forwarder exiting"
+                            );
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "failed to deserialize bidirectional request frame; killing context"
+                        );
+                        forwarder_ctx.kill();
+                        break;
+                    }
+                }
+            }
+        });
+
+        let input_stream: crate::engine::DataStream<T> =
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(frame_rx));
+        let request: ManyIn<T> = ResponseStream::new(input_stream, context_arc.clone());
+
+        let stream = self
+            .engine
+            .get()
+            .expect("engine not set")
+            .generate(request)
+            .await
+            .map_err(|e| {
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::GENERATE])
+                        .inc();
+                }
+                PipelineError::GenerateError(e)
+            });
+
+        let mut stream = match stream {
+            Ok(stream) => {
+                let _result = publisher.send_prologue(None).await;
+                WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS
+                    .observe(start_time.elapsed().as_secs_f64());
+                stream
+            }
+            Err(e) => {
+                let error_string = e.to_string();
+                #[cfg(debug_assertions)]
+                {
+                    tracing::debug!(
+                        "bidirectional generate() failed (with debug backtrace): {:?}",
+                        e
+                    );
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    tracing::error!("bidirectional generate() failed: {error_string}");
+                }
+                let _result = publisher.send_prologue(Some(error_string)).await;
+                Err(e)?
+            }
+        };
+
+        let context = stream.context();
+        let mut send_complete_final = true;
+        let mut saw_error_response = false;
+        while let Some(resp) = stream.next().await {
+            let is_error = resp.err().is_some();
+            if is_error {
+                saw_error_response = true;
+            }
+            let resp_wrapper = NetworkStreamWrapper {
+                data: Some(resp),
+                complete_final: false,
+            };
+            let resp_bytes = serde_json::to_vec(&resp_wrapper)
+                .expect("fatal error: invalid response object - this should never happen");
+            if let Some(m) = self.metrics() {
+                m.response_bytes.inc_by(resp_bytes.len() as u64);
+            }
+            if (publisher.send(resp_bytes.into()).await).is_err() {
+                send_complete_final = false;
+                if context.is_stopped() {
+                    tracing::warn!(
+                        "Failed to publish bidirectional response for stream {}",
+                        context.id()
+                    );
+                } else {
+                    tracing::error!(
+                        "Failed to publish bidirectional response for stream {}",
+                        context.id()
+                    );
+                    context.stop_generating();
+                }
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
+                        .inc();
+                }
+                break;
+            } else if !is_error && let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                notifier.notify_one();
+            }
+        }
+        if send_complete_final {
+            let resp_wrapper = NetworkStreamWrapper::<U> {
+                data: None,
+                complete_final: true,
+            };
+            let resp_bytes = serde_json::to_vec(&resp_wrapper)
+                .expect("fatal error: invalid response object - this should never happen");
+            if let Some(m) = self.metrics() {
+                m.response_bytes.inc_by(resp_bytes.len() as u64);
+            }
+            if (publisher.send(resp_bytes.into()).await).is_err() {
+                tracing::error!(
+                    "Failed to publish complete final for bidirectional stream {}",
+                    context.id()
+                );
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
+                        .inc();
+                }
+            }
+            if let (false, Some(notifier)) = (
+                saw_error_response,
+                self.endpoint_health_check_notifier.get(),
+            ) {
+                notifier.notify_one();
+            }
+        }
+
         drop(_inflight_guard);
 
         Ok(())
