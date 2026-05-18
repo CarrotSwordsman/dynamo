@@ -408,7 +408,7 @@ where
 }
 
 #[async_trait]
-impl<T, U> PushWorkHandler for crate::pipeline::network::BidirectionalIngress<T, U>
+impl<T, U> PushWorkHandler for Ingress<ManyIn<T>, ManyOut<U>>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
     U: Data + Serialize + MaybeError + std::fmt::Debug,
@@ -418,7 +418,8 @@ where
         endpoint: &crate::component::Endpoint,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()> {
-        crate::pipeline::network::BidirectionalIngress::add_metrics(self, endpoint, metrics_labels)
+        use crate::pipeline::network::Ingress;
+        Ingress::add_metrics(self, endpoint, metrics_labels)
     }
 
     fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
@@ -585,9 +586,9 @@ where
         let request: ManyIn<T> = ResponseStream::new(input_stream, context_arc.clone());
 
         let stream = self
-            .engine
+            .segment
             .get()
-            .expect("engine not set")
+            .expect("segment not set")
             .generate(request)
             .await
             .map_err(|e| {
