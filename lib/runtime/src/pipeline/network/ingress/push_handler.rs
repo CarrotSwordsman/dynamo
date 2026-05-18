@@ -454,28 +454,26 @@ where
             }
         });
 
-        // Decode the control message + first frame.
+        // Bidirectional envelopes are header-only — all request frames
+        // (including the first) flow on the request-stream socket once
+        // it's dialed in. A HeaderAndData payload here would mean the
+        // sender used the unary wire shape; reject it.
         let msg = TwoPartCodec::default()
             .decode_message(payload)?
             .into_message_type();
 
-        let (control_msg, first_frame) = match msg {
-            TwoPartMessageType::HeaderAndData(header, data) => {
-                let control_msg: RequestControlMessage =
-                    serde_json::from_slice(&header).map_err(|err| {
-                        let json_str = String::from_utf8_lossy(&header);
-                        if let Some(m) = self.metrics() {
-                            m.error_counter
-                                .with_label_values(&[work_handler::error_types::DESERIALIZATION])
-                                .inc();
-                        }
-                        PipelineError::DeserializationError(format!(
-                            "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}"
-                        ))
-                    })?;
-                let first_frame: T = serde_json::from_slice(&data)?;
-                (control_msg, first_frame)
-            }
+        let control_msg = match msg {
+            TwoPartMessageType::HeaderOnly(header) => serde_json::from_slice::<RequestControlMessage>(&header).map_err(|err| {
+                let json_str = String::from_utf8_lossy(&header);
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::DESERIALIZATION])
+                        .inc();
+                }
+                PipelineError::DeserializationError(format!(
+                    "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}"
+                ))
+            })?,
             _ => {
                 if let Some(m) = self.metrics() {
                     m.error_counter
@@ -483,7 +481,7 @@ where
                         .inc();
                 }
                 return Err(PipelineError::Generic(String::from(
-                    "Unexpected message from work queue; unable extract a TwoPartMessage with a header and data",
+                    "bidirectional engine received a non-header-only envelope",
                 )));
             }
         };
@@ -550,14 +548,10 @@ where
         })?;
 
         // Forwarder: deserialize raw bytes off the request socket into `T`
-        // and feed the engine's `ManyIn<T>` input. Seed with the first frame
-        // we already decoded from the control envelope.
+        // and feed the engine's `ManyIn<T>` input. Every request frame
+        // (including the first) flows over this socket — the envelope is
+        // header-only.
         let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<T>(8);
-        if frame_tx.send(first_frame).await.is_err() {
-            return Err(PipelineError::Generic(String::from(
-                "engine input receiver dropped before first frame could be sent",
-            )));
-        }
         let forwarder_ctx = context_arc.clone();
         tokio::spawn(async move {
             let mut rx = request_stream_recv.rx;
