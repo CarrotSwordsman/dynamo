@@ -130,12 +130,30 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
         # Modify the script to use virtual environment pip instead of system pip3
         sed -i 's/pip3 install/uv pip install/g' /tmp/install_tensorrt.sh && \
         bash /tmp/install_tensorrt.sh && \
-        # Install from local wheel directory in build context
+        # Install from local wheel directory in build context. The COPY of /trtllm_wheel
+        # above is gated at *render* time by `context.trtllm.has_trtllm_context == "1"`,
+        # while this branch is gated by the build-time ARG `HAS_TRTLLM_CONTEXT`. If render-
+        # time and build-time gates disagree (e.g. you set --build-arg HAS_TRTLLM_CONTEXT=1
+        # but rendered with the default has_trtllm_context: "0"), /trtllm_wheel won't exist
+        # here — surface a clear actionable error rather than letting `find` print "No such
+        # file or directory".
+        if [ ! -d /trtllm_wheel ]; then \
+            echo "ERROR: HAS_TRTLLM_CONTEXT=1 but /trtllm_wheel directory does not exist." >&2; \
+            echo "  Most likely cause: the Dockerfile was rendered with the default" >&2; \
+            echo "  context.trtllm.has_trtllm_context=\"0\", so 'COPY --from=trtllm_wheel ...'" >&2; \
+            echo "  was omitted at render time." >&2; \
+            echo "  Fix: set has_trtllm_context: \"1\" in container/context.yaml and re-render" >&2; \
+            echo "       via container/render.py, OR set --build-arg HAS_TRTLLM_CONTEXT=0 to" >&2; \
+            echo "       install from the trtllm wheel image / PyPI fallback instead." >&2; \
+            exit 1; \
+        fi; \
         WHEEL_FILE="$(find /trtllm_wheel -name "*.whl" | head -n 1)"; \
         if [ -n "$WHEEL_FILE" ]; then \
             uv pip install "$WHEEL_FILE"; \
         else \
-            echo "No wheel file found in /trtllm_wheel directory."; \
+            echo "ERROR: HAS_TRTLLM_CONTEXT=1 and /trtllm_wheel exists but contains no *.whl file." >&2; \
+            echo "  Fix: pass --build-context trtllm_wheel=<dir> where <dir> contains the" >&2; \
+            echo "       built TensorRT-LLM wheel, OR set --build-arg HAS_TRTLLM_CONTEXT=0." >&2; \
             exit 1; \
         fi; \
     elif [ -n "$(find /trtllm_wheel_image -name "*.whl" | head -n 1)" ]; then \
