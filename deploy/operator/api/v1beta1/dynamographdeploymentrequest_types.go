@@ -443,8 +443,8 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:validation:Enum=auto;sglang;trtllm;vllm
 	Backend BackendType `json:"backend,omitempty"`
 
-	// Image is the container image reference for the profiling job (frontend image).
-	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1".
+	// Image is the container image for the DGDR profiling job.
+	// For current releases, use "nvcr.io/nvidia/ai-dynamo/dynamo-planner:DYNAMO_VERSION".
 	// +optional
 	Image string `json:"image,omitempty"`
 
