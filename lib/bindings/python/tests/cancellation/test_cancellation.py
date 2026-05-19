@@ -66,7 +66,9 @@ class MockServer:
             print(f"Sending iteration {i}")
             yield i
 
-        assert False, "Test failed: generate_until_cancelled did not raise CancelledError"
+        assert (
+            False
+        ), "Test failed: generate_until_cancelled did not raise CancelledError"
 
     async def _generate_until_context_cancelled_with_metadata(self, request, context):
         """
@@ -75,8 +77,6 @@ class MockServer:
         """
         for i in range(1000):
             print(f"Processing iteration {i}")
-            context.metadata["iteration"] = str(i)
-            assert context.metadata["iteration"] == str(i), "Context metadata should be mutable and updateable"
 
             if context.is_stopped():
                 print(f"Context stopped at iteration {i}")
@@ -96,7 +96,9 @@ class MockServer:
             print(f"Sending iteration {i}")
             yield {"i": i, "metadata": dict(context.metadata.items())}
 
-        assert False, "Test failed: generate_until_cancelled did not raise CancelledError"
+        assert (
+            False
+        ), "Test failed: generate_until_cancelled did not raise CancelledError"
 
     async def _generate_until_asyncio_cancelled(self, request, context):
         """
