@@ -40,28 +40,6 @@ use tracing::Instrument;
 
 const CONTROL_MESSAGE_MAX_BYTES: usize = 128 * 1024;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ResponseType {
-    SingleOut,
-    ManyOut,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RequestControlMessage {
-    id: String,
-    request_type: RequestType,
-    response_type: ResponseType,
-    connection_info: ConnectionInfo,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    metadata: BTreeMap<String, String>,
-    /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
-    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
-    /// Reliable for single-machine profiling; treat cross-host values as approximate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    frontend_send_ts_ns: Option<u64>,
-}
-
 fn serialize_control_message(control_message: &RequestControlMessage) -> Result<Vec<u8>, Error> {
     let ctrl = serde_json::to_vec(control_message)?;
     if ctrl.len() > CONTROL_MESSAGE_MAX_BYTES {
