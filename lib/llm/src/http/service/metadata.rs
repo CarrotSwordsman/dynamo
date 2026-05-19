@@ -27,6 +27,7 @@ pub(super) fn metadata_header_prefix() -> &'static str {
     METADATA_HEADER_PREFIX.get_or_init(|| {
         std::env::var(DYNAMO_METADATA_HEADER_ENV)
             .unwrap_or_else(|_| DYNAMO_METADATA_HEADER_PREFIX_DEFAULT.to_string())
+            .to_ascii_lowercase()
     })
 }
 
