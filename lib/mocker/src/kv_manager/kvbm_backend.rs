@@ -1237,9 +1237,10 @@ impl KvManager {
         // randomised hash that can't possibly be in the cache across requests
         // — skip the PLH lookup (PLH is deterministic from tokens) to stay
         // consistent with that no-reuse contract.
-        let overlap_blocks = if sequence.enable_prefix_caching() {
+        let (overlap_blocks, inactive_overlap_blocks) = if sequence.enable_prefix_caching() {
             let plhs = sequence.positional_lineage_hashes();
             let mut overlap = 0;
+            let mut inactive_overlap = 0;
             for (i, block) in seq_blocks.iter().enumerate() {
                 match block {
                     UniqueBlock::FullBlock(seq_hash) => {
@@ -1252,6 +1253,7 @@ impl KvManager {
                         };
                         if self.registered_blocks.contains_key(plh) {
                             overlap += 1;
+                            inactive_overlap += 1;
                         } else {
                             break;
                         }
@@ -1259,9 +1261,9 @@ impl KvManager {
                     UniqueBlock::PartialBlock(_) => break,
                 }
             }
-            overlap
+            (overlap, inactive_overlap)
         } else {
-            0
+            (0, 0)
         };
 
         let new_blocks = seq_blocks.len() - overlap_blocks;
@@ -1272,6 +1274,7 @@ impl KvManager {
             new_blocks,
             new_tokens,
             cached_tokens,
+            inactive_overlap_blocks,
         }
     }
 }

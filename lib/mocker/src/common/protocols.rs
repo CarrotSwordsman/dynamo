@@ -210,11 +210,22 @@ pub struct DirectRequest {
 /// Represents the cost of prefilling content in the cache
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrefillCost {
+    /// Blocks that must be freshly allocated to admit this request — the
+    /// uncached suffix of the prompt. Same as `unique_blocks.len()` minus
+    /// every block whose content is already resident in the cache (whether
+    /// pinned by another request or sitting in the inactive pool).
     pub new_blocks: usize,
     pub new_tokens: usize,
     /// Number of tokens already cached (prefix hit).
     /// isl = cached_tokens + new_tokens
     pub cached_tokens: usize,
+    /// Blocks whose content is cached but currently sitting in the
+    /// **inactive** pool (i.e., not pinned by any running request). Reusing
+    /// these on admission promotes them from inactive to active, which
+    /// consumes free-pool capacity even though no new content is computed.
+    /// Useful as additional demand when checking whether a waiting request
+    /// can fit without preempting running work.
+    pub inactive_overlap_blocks: usize,
 }
 
 impl PrefillCost {
@@ -1093,6 +1104,10 @@ mod tests {
         assert_eq!(restored.worker_type, WorkerType::Decode);
         assert_eq!(restored.max_num_seqs, None);
         assert_eq!(restored.max_num_batched_tokens, None);
+        assert_eq!(
+            restored.scheduler_reserve_full_isl,
+            args.scheduler_reserve_full_isl
+        );
     }
 
     #[test]
