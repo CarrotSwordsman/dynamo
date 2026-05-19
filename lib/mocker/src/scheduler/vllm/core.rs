@@ -837,10 +837,7 @@ impl VllmCore {
         // `Blocked` here bypasses the shared preemption branch below, so
         // running requests are not evicted to make room for an admission
         // that real vLLM would never have accepted.
-        if from_waiting
-            && self.args.scheduler_reserve_full_isl
-            && remaining_known_tokens > 0
-        {
+        if from_waiting && self.args.scheduler_reserve_full_isl && remaining_known_tokens > 0 {
             let cost = self.kv_manager.get_prefill_cost(&request.sequence);
             let free_blocks = self
                 .kv_manager
