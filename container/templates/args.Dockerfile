@@ -139,4 +139,6 @@ ARG TRTLLM_PYTHON_VERSION={{ context[framework].python_version }}
 {% if make_efa == true %}
 ARG EFA_VERSION={{ context.dynamo.efa_version }}
 ARG EFA_BASE_IMAGE={{ "runtime" if target=="runtime" else "dev" }}
+ARG PATCHED_LIBFABRIC_REPO={{ context.dynamo.patched_libfabric_repo }}
+ARG PATCHED_LIBFABRIC_REF={{ context.dynamo.patched_libfabric_ref }}
 {%- endif -%}
