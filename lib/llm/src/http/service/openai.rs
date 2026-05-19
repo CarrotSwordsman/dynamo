@@ -35,6 +35,7 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
+    metadata::extract_metadata_from_headers,
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
         process_response_and_observe_metrics,
@@ -438,7 +439,8 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
+    let mut request =
+        Context::with_id_and_metadata(request, request_id, extract_metadata_from_headers(&headers));
     attach_x_request_id(&mut request, &headers);
     let context = request.context();
 
@@ -693,7 +695,11 @@ async fn completions_batch(
 
         // Generate unique request_id for each prompt: original_id-{prompt_idx}
         let unique_request_id = format!("{}-{}", request.id(), prompt_idx);
-        let mut single_request_context = Context::with_id(single_request, unique_request_id);
+        let mut single_request_context = Context::with_id_and_metadata(
+            single_request,
+            unique_request_id,
+            request.metadata().clone(),
+        );
         copy_x_request_id(&request, &mut single_request_context);
 
         // Generate stream for this prompt
@@ -828,7 +834,8 @@ async fn embeddings(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request =
+        Context::with_id_and_metadata(request, request_id, extract_metadata_from_headers(&headers));
     let request_id = request.id().to_string();
 
     // Embeddings are typically not streamed, so we default to non-streaming
@@ -920,7 +927,8 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
+    let mut request =
+        Context::with_id_and_metadata(request, request_id, extract_metadata_from_headers(&headers));
     attach_x_request_id(&mut request, &headers);
     let context = request.context();
 
@@ -1537,7 +1545,8 @@ async fn handler_responses(
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = Context::with_id(request, request_id);
+    let mut request =
+        Context::with_id_and_metadata(request, request_id, extract_metadata_from_headers(&headers));
     attach_x_request_id(&mut request, &headers);
     let context = request.context();
 
@@ -2124,7 +2133,8 @@ async fn images(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request =
+        Context::with_id_and_metadata(request, request_id, extract_metadata_from_headers(&headers));
     let request_id = request.id().to_string();
 
     // Images are typically not streamed, so we default to non-streaming
@@ -2254,7 +2264,8 @@ async fn videos(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request =
+        Context::with_id_and_metadata(request, request_id, extract_metadata_from_headers(&headers));
     let request_id = request.id().to_string();
 
     let streaming = request.stream.unwrap_or(false);
@@ -2373,7 +2384,8 @@ async fn video_stream(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request =
+        Context::with_id_and_metadata(request, request_id, extract_metadata_from_headers(&headers));
     let model = request.model.clone();
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
@@ -2536,7 +2548,8 @@ async fn audio_speech(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = Context::with_id(request, request_id);
+    let request =
+        Context::with_id_and_metadata(request, request_id, extract_metadata_from_headers(&headers));
     let request_id = request.id().to_string();
 
     let streaming = false;

@@ -66,7 +66,7 @@ pub async fn tensor_response_stream(
         endpoint: Endpoint::Tensor.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id.clone());
+    let request = Context::with_id_and_metadata(request, request_id.clone(), Default::default());
     let context = request.context();
 
     // [gluo TODO] revisit metrics to properly expose it
