@@ -375,6 +375,7 @@ struct MockEngineArgsSerde {
     max_num_batched_tokens: OptionalConfigValue<usize>,
     enable_prefix_caching: OptionalConfigValue<bool>,
     enable_chunked_prefill: OptionalConfigValue<bool>,
+    scheduler_reserve_full_isl: OptionalConfigValue<bool>,
     speedup_ratio: OptionalConfigValue<f64>,
     decode_speedup_ratio: OptionalConfigValue<f64>,
     dp_size: OptionalConfigValue<u32>,
@@ -494,6 +495,14 @@ pub struct MockEngineArgs {
 
     #[builder(default = true)]
     pub enable_chunked_prefill: bool,
+
+    /// If true, the scheduler refuses to admit a waiting request unless the
+    /// full input sequence (minus prefix-cache hits) fits in available KV
+    /// capacity. Mirrors vLLM's `scheduler_reserve_full_isl` (default `True`
+    /// upstream) and prevents over-admission / preemption thrash under
+    /// chunked prefill when running long-context traces.
+    #[builder(default = true)]
+    pub scheduler_reserve_full_isl: bool,
 
     #[builder(default = "1.0")]
     #[validate(range(min = 0.0))]
@@ -776,6 +785,12 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         {
             builder = builder.enable_chunked_prefill(enable_chunked_prefill);
         }
+        if let Some(scheduler_reserve_full_isl) = compat
+            .scheduler_reserve_full_isl
+            .into_non_null("scheduler_reserve_full_isl")?
+        {
+            builder = builder.scheduler_reserve_full_isl(scheduler_reserve_full_isl);
+        }
         if let Some(speedup_ratio) = compat.speedup_ratio.into_non_null("speedup_ratio")? {
             builder = builder.speedup_ratio(speedup_ratio);
         }
@@ -1041,6 +1056,7 @@ mod tests {
             "max_num_batched_tokens": args.max_num_batched_tokens,
             "enable_prefix_caching": args.enable_prefix_caching,
             "enable_chunked_prefill": args.enable_chunked_prefill,
+            "scheduler_reserve_full_isl": args.scheduler_reserve_full_isl,
             "speedup_ratio": args.speedup_ratio,
             "decode_speedup_ratio": args.decode_speedup_ratio,
             "dp_size": args.dp_size,

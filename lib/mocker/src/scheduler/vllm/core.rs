@@ -806,10 +806,9 @@ impl VllmCore {
             .get(&uuid)
             .unwrap_or_else(|| panic!("schedule_request: {uuid} missing from state.requests"));
         debug_assert_vllm_request_invariants(uuid, request);
+        let prefill_cost = self.kv_manager.get_prefill_cost(&request.sequence);
         let cached_prefix_tokens = if request.num_computed_tokens == 0 {
-            self.kv_manager
-                .get_prefill_cost(&request.sequence)
-                .cached_tokens
+            prefill_cost.cached_tokens
         } else {
             0
         };
@@ -826,6 +825,25 @@ impl VllmCore {
             && prompt_remaining > *token_budget
         {
             return ScheduleOutcome::Blocked;
+        }
+
+        // Mirror vLLM's `scheduler_reserve_full_isl`: when admitting a request
+        // off the waiting queue, refuse if the full ISL (minus prefix-cache
+        // hits) cannot fit in currently free KV capacity. Returning `Blocked`
+        // here bypasses the shared preemption branch below, so running
+        // requests are not evicted to make room for an admission that real
+        // vLLM would never have accepted.
+        if from_waiting
+            && self.args.scheduler_reserve_full_isl
+            && remaining_known_tokens > 0
+        {
+            let free_blocks = self
+                .kv_manager
+                .max_capacity()
+                .saturating_sub(self.kv_manager.num_active_blocks());
+            if prefill_cost.new_blocks > free_blocks {
+                return ScheduleOutcome::Blocked;
+            }
         }
 
         let desired_tokens = remaining_known_tokens.min(*token_budget);
