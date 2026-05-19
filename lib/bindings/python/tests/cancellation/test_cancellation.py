@@ -98,36 +98,6 @@ class MockServer:
 
         assert False, "Test failed: generate_until_cancelled did not raise CancelledError"
 
-    async def _generate_until_context_cancelled_with_metadata(self, request, context):
-        """
-        Variant of _generate_until_context_cancelled that includes context metadata
-        in each yielded payload so the test can assert metadata propagation.
-        """
-        for i in range(1000):
-            print(f"Processing iteration {i}")
-
-            if context.is_stopped():
-                print(f"Context stopped at iteration {i}")
-                self.context_is_stopped = True
-                self.context_is_killed = context.is_killed()
-                self.context_metadata = dict(context.metadata.items())
-                raise asyncio.CancelledError
-
-            if context.is_killed():
-                print(f"Context killed at iteration {i}")
-                self.context_is_stopped = context.is_stopped()
-                self.context_is_killed = True
-                self.context_metadata = dict(context.metadata.items())
-                raise asyncio.CancelledError
-
-            await asyncio.sleep(0.1)
-            print(f"Sending iteration {i}")
-            yield {"i": i, "metadata": dict(context.metadata.items())}
-
-        assert (
-            False
-        ), "Test failed: generate_until_cancelled did not raise CancelledError"
-
     async def _generate_until_asyncio_cancelled(self, request, context):
         """
         Generate method that yields numbers 0-999 every 0.1 seconds
