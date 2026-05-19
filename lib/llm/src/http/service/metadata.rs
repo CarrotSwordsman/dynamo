@@ -1,5 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-FileCopyrightText: Copyright (c) 2026 Baseten, Inc. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES and Baseten, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! HTTP header → context metadata extraction.
