@@ -121,27 +121,22 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 # Install Dynamo runtime wheels and optional KVBM/GMS wheels.
 # Use --no-deps to prevent dependency conflicts (e.g., KVBM downgrading nixl).
 
+# Non-cuda  base images use a virtualenv (/opt/venv) where vLLM is installed, so we
+# must install Dynamo wheels there (--python) rather than into system site-packages.
+{% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
+
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install \
-{% if device == "cuda" %}
-        --system \
-{% endif %}
-        --no-deps \
-        /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-        /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    && if [ "${ENABLE_KVBM}" = "true" ]; then \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+    if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -n "$KVBM_WHEEL" ]; then uv pip install \
-{% if device == "cuda" %}
-            --system \
-{% endif %}
-            --no-deps "$KVBM_WHEEL"; fi; \
-    fi{% if device == "cuda" %} && \
+        if [ -n "$KVBM_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$KVBM_WHEEL"; fi; \
+    fi && \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -n "$GMS_WHEEL" ]; then uv pip install --system --no-deps "$GMS_WHEEL"; fi; \
-    fi{% endif %}
+        if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
+    fi
 
 # vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
 # jq for readable curl output just like the upstream omni image does.
@@ -181,6 +176,12 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
+{% endif %}
+
+{% if device == "xpu" %}
+# Remove vLLM source tree left by the XPU base image to avoid pytest collection
+# conflicts (duplicate conftest.py plugins, missing relative paths).
+RUN rm -rf /workspace/vllm
 {% endif %}
 
 USER dynamo
