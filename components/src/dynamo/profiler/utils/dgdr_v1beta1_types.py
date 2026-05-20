@@ -253,7 +253,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     )
     image: Optional[str] = Field(
         default=None,
-        description='Image is the container image for the DGDR profiling job. For current releases, use "nvcr.io/nvidia/ai-dynamo/dynamo-planner:DYNAMO_VERSION".',
+        description='Image is the container image for the DGDR profiling job. Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1".',
     )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,
