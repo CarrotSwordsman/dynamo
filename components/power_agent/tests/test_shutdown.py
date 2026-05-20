@@ -129,6 +129,52 @@ class TestSigtermViaActuator(_SigtermTestBase):
 
         self.assertTrue(power_agent._shutdown.is_set())
 
+    def test_actuator_shutdown_failure_is_logged_not_silently_swallowed(self):
+        """Per PR #9682 CodeRabbit review on power_agent.py:355.
+
+        Pre-fix the shutdown try/except swallowed failures silently
+        (`except Exception: pass`), so a DCGM hostengine fault or NVML
+        teardown error at SIGTERM time was invisible in pod logs.
+        We still don't re-raise (the agent MUST exit cleanly) but the
+        failure now writes a traceback at ERROR level so operators
+        can correlate with hostengine / driver events post-mortem.
+        """
+        power_agent._managed_gpu_indices.add(0)
+        actuator = MagicMock()
+        actuator.name = "dcgm"
+        actuator.shutdown.side_effect = RuntimeError("hostengine gone")
+        power_agent._active_actuator = actuator
+
+        with patch.object(power_agent, "pynvml", MagicMock()):
+            with self.assertLogs("power_agent", level="ERROR") as cm:
+                power_agent._handle_sigterm(signal.SIGTERM, None)
+
+        # The original RuntimeError message must appear in the log
+        # output (logger.exception attaches the traceback).
+        joined = "\n".join(cm.output)
+        self.assertIn("hostengine gone", joined)
+        # Sanity: shutdown event still fires.
+        self.assertTrue(power_agent._shutdown.is_set())
+
+    def test_raw_nvml_shutdown_failure_is_logged(self):
+        """Defensive-fallback path: when no actuator is registered and
+        `pynvml.nvmlShutdown()` itself raises, the failure must be
+        logged (was silently swallowed pre-fix)."""
+        # No managed GPUs so we skip the per-GPU restore loop and go
+        # straight to the actuator-or-NVML shutdown branch.
+        mock_nvml = MagicMock()
+        mock_nvml.nvmlShutdown.side_effect = RuntimeError(
+            "NVML library gone (driver unloaded)"
+        )
+
+        with patch.object(power_agent, "pynvml", mock_nvml):
+            with self.assertLogs("power_agent", level="ERROR") as cm:
+                power_agent._handle_sigterm(signal.SIGTERM, None)
+
+        joined = "\n".join(cm.output)
+        self.assertIn("NVML library gone", joined)
+        self.assertTrue(power_agent._shutdown.is_set())
+
 
 class TestSigtermFallback(_SigtermTestBase):
     """Defensive fallback — actuator not yet registered.

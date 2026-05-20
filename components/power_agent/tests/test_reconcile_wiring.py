@@ -135,6 +135,154 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
         actuator.apply_cap.assert_called_once_with(0, 450)
 
 
+class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
+    """Per PR #9682 CodeRabbit review on power_agent.py:636.
+
+    The pre-fix `_reconcile_gpu` appended `(uid, annotation)` once per
+    PID, so one pod running N GPU processes (which is the common
+    pattern for TP/PP/EP workloads, ranks-per-GPU, helper
+    workers / profilers) showed up as N rows in `pod_annotations`.
+    Downstream `_resolve_cap_for_gpu` uses `len(pod_annotations) > 1`
+    to detect the multi-pod-per-GPU misconfig, so a one-pod / N-PID
+    GPU would:
+
+      * Spuriously WARN "N pods all agree on cap …" even though
+        only one pod was on the GPU.
+      * On a pod whose annotation was missing or invalid, take the
+        conflict-resolution branch (because `len(unique) > 1` is
+        possible only with multi-pod, but the safe-default fallback
+        in `_resolve_cap_for_gpu` was reached via `len > 1 +
+        agree-or-conflict`).
+      * Bump `multi_pod_gpu_total{disposition="agree"}`, polluting the
+        operator dashboard's multi-pod-misconfig alert.
+
+    The fix dedupes by pod UID before the policy resolver sees the
+    list. This file pins:
+
+      1. One pod / two PIDs → one `pod_annotations` entry → no spurious
+         multi-pod WARNING or counter bump.
+      2. Two pods / two PIDs each (four PIDs total) → two
+         `pod_annotations` entries (one per pod) — multi-pod policy
+         still fires correctly.
+      3. Two pods that disagree (each with multiple PIDs) → the
+         conflict branch still fires once and resolves to safe-default.
+    """
+
+    def setUp(self):
+        power_agent._managed_gpu_indices.clear()
+
+    def test_one_pod_with_multiple_pids_counts_once(self):
+        """The load-bearing dedup test. Three PIDs from the same pod
+        must produce ONE entry in the policy resolver's input, not
+        three. Otherwise the resolver thinks three pods agreed on
+        the same cap and bumps the multi-pod counter."""
+        actuator = MagicMock()
+        actuator.list_running_pids.return_value = [1111, 2222, 3333]
+        agent = _make_agent_with_actuator(actuator)
+
+        with patch.object(power_agent, "pynvml", MagicMock()):
+            with patch(
+                "power_agent._extract_pod_uid_from_cgroup",
+                # All three PIDs resolve to the same pod UID — the
+                # realistic TP=3 ranks-per-GPU pattern.
+                side_effect=lambda pid: "pod-tp3",
+            ):
+                with patch(
+                    "power_agent._resolve_cap_for_gpu",
+                    return_value=400,
+                ) as resolver:
+                    agent._reconcile_gpu(0, {"pod-tp3": "400"})
+
+        resolver.assert_called_once()
+        # Second positional arg is `pod_annotations`. Must contain
+        # exactly one entry, even though three PIDs were enumerated.
+        pod_annotations = resolver.call_args.args[1]
+        self.assertEqual(
+            len(pod_annotations),
+            1,
+            f"Expected dedup to one pod entry; got {pod_annotations!r}",
+        )
+        self.assertEqual(pod_annotations[0], ("pod-tp3", "400"))
+        actuator.apply_cap.assert_called_once_with(0, 400)
+
+    def test_one_pod_multi_pid_does_not_bump_multi_pod_counter(self):
+        """End-to-end through the real resolver: a single pod with
+        multiple PIDs must NOT bump multi_pod_gpu_total{agree} — that
+        counter is meant for the operator-misconfig topology where
+        two distinct pods share a GPU."""
+        actuator = MagicMock()
+        actuator.list_running_pids.return_value = [1111, 2222]
+        agent = _make_agent_with_actuator(actuator)
+
+        # Real metrics object so we can assert against its counters.
+        from tests.test_multi_pod_policy import _FakeMetrics
+
+        agent.metrics = _FakeMetrics()
+
+        with patch.object(power_agent, "pynvml", MagicMock()):
+            with patch(
+                "power_agent._extract_pod_uid_from_cgroup",
+                side_effect=lambda pid: "pod-tp2",
+            ):
+                agent._reconcile_gpu(0, {"pod-tp2": "350"})
+
+        # Single-pod path → agree counter STAYS at zero.
+        self.assertEqual(agent.metrics.multi_pod_agree, 0)
+        self.assertEqual(agent.metrics.multi_pod_conflict, 0)
+        actuator.apply_cap.assert_called_once_with(0, 350)
+
+    def test_two_pods_with_multiple_pids_each_counts_as_two(self):
+        """Genuine multi-pod-per-GPU topology: two pods, each with
+        two PIDs (four PIDs total). After dedup, the resolver must
+        see exactly TWO entries — one per pod — and the multi-pod
+        WARNING / counter must still fire."""
+        actuator = MagicMock()
+        actuator.list_running_pids.return_value = [1, 2, 3, 4]
+        agent = _make_agent_with_actuator(actuator)
+
+        from tests.test_multi_pod_policy import _FakeMetrics
+
+        agent.metrics = _FakeMetrics()
+
+        def cgroup(pid):
+            return {1: "pod-A", 2: "pod-A", 3: "pod-B", 4: "pod-B"}[pid]
+
+        with patch.object(power_agent, "pynvml", MagicMock()):
+            with patch("power_agent._extract_pod_uid_from_cgroup", side_effect=cgroup):
+                agent._reconcile_gpu(0, {"pod-A": "400", "pod-B": "400"})
+
+        # Genuine multi-pod-agree → counter ticks once (not twice).
+        self.assertEqual(agent.metrics.multi_pod_agree, 1)
+        actuator.apply_cap.assert_called_once_with(0, 400)
+
+    def test_two_disagreeing_pods_each_multi_pid_still_resolves_to_safe_default(
+        self,
+    ):
+        """Conflict branch survives the dedup: two pods with
+        different caps each contributing multiple PIDs → safe default
+        wins, conflict counter ticks once."""
+        actuator = MagicMock()
+        actuator.list_running_pids.return_value = [10, 11, 20, 21]
+        agent = _make_agent_with_actuator(actuator)
+        agent.safe_default_watts = 500
+
+        from tests.test_multi_pod_policy import _FakeMetrics
+
+        agent.metrics = _FakeMetrics()
+
+        def cgroup(pid):
+            return {10: "pod-A", 11: "pod-A", 20: "pod-B", 21: "pod-B"}[pid]
+
+        with patch.object(power_agent, "pynvml", MagicMock()):
+            with patch("power_agent._extract_pod_uid_from_cgroup", side_effect=cgroup):
+                agent._reconcile_gpu(0, {"pod-A": "300", "pod-B": "600"})
+
+        actuator.apply_cap.assert_called_once_with(0, 500)
+        self.assertEqual(agent.metrics.multi_pod_conflict, 1)
+        # Critical: conflict tick ONCE, not once-per-PID.
+        self.assertEqual(agent.metrics.safe_default_applied, 1)
+
+
 class TestReconcileGpuPolicyResolution(unittest.TestCase):
     """The v1.6 wiring must preserve the multi-pod-per-GPU resolution
     contract (`_resolve_cap_for_gpu`). Two pods that agree → use that

@@ -274,6 +274,58 @@ class TestShutdown(unittest.TestCase):
 
         self.assertIsNone(actuator._handle)
 
+    def test_shutdown_logs_group_delete_failure(self):
+        """Per PR #9682 CodeRabbit review on actuator.py shutdown.
+
+        Pre-fix the group.Delete() failure was silently swallowed
+        (`except Exception: pass`). We still don't re-raise (cleanup
+        is best-effort) but the traceback must appear in pod logs so
+        operators can diagnose DCGM resource leaks.
+        """
+        actuator, modules, handle, nvml = _make_initialized_actuator()
+        group = MagicMock()
+        group.Delete.side_effect = Exception("group delete failed")
+        actuator._groups[7] = group  # specific gpu_id we'll look for in log
+
+        with patch.dict("sys.modules", {**modules, "pynvml": nvml}):
+            with self.assertLogs("power_agent.actuator", level="ERROR") as cm:
+                actuator.shutdown()
+
+        joined = "\n".join(cm.output)
+        self.assertIn("group delete failed", joined)
+        # The gpu_id context must be in the log message so operators
+        # can spot WHICH GPU's group leaked.
+        self.assertIn("gpu_id=7", joined)
+
+    def test_shutdown_logs_hostengine_shutdown_failure(self):
+        """`handle.Shutdown()` failure (e.g. DCGM_ST_CONNECTION_NOT_VALID)
+        must be logged with host/port context, not silently dropped."""
+        actuator, modules, handle, nvml = _make_initialized_actuator()
+        handle.Shutdown.side_effect = Exception("connection not valid")
+
+        with patch.dict("sys.modules", {**modules, "pynvml": nvml}):
+            with self.assertLogs("power_agent.actuator", level="ERROR") as cm:
+                actuator.shutdown()
+
+        joined = "\n".join(cm.output)
+        self.assertIn("connection not valid", joined)
+        # host:port context should let operators correlate with
+        # specific hostengine pod/service.
+        self.assertIn(actuator._host, joined)
+
+    def test_shutdown_logs_nvml_shutdown_failure(self):
+        """`pynvml.nvmlShutdown()` failure during DcgmActuator.shutdown()
+        must surface — pre-fix it was silently dropped."""
+        actuator, modules, handle, nvml = _make_initialized_actuator()
+        nvml.nvmlShutdown.side_effect = Exception("nvml teardown failed")
+
+        with patch.dict("sys.modules", {**modules, "pynvml": nvml}):
+            with self.assertLogs("power_agent.actuator", level="ERROR") as cm:
+                actuator.shutdown()
+
+        joined = "\n".join(cm.output)
+        self.assertIn("nvml teardown failed", joined)
+
 
 # ---------------------------------------------------------------------------
 # Read surface

@@ -429,18 +429,35 @@ class DcgmActuator:
         Defensive against the hostengine already being gone — by
         SIGTERM time it may already be evicted, so the Shutdown call
         itself can raise `DCGM_ST_CONNECTION_NOT_VALID`.
+
+        Per PR #9682 CodeRabbit review, individual cleanup failures are
+        LOGGED (with traceback) rather than silently dropped — silent
+        catches made hostengine / NVML shutdown faults invisible in
+        pod logs. We still don't re-raise from this method: cleanup is
+        best-effort and callers (`power_agent._handle_sigterm`) need
+        to proceed to `_shutdown.set()` regardless so the container
+        exits promptly.
         """
         if self._handle is not None:
-            for grp in self._groups.values():
+            for gpu_id, grp in self._groups.items():
                 try:
                     grp.Delete()
                 except Exception:
-                    pass
+                    logger.exception(
+                        "DCGM group Delete() failed for gpu_id=%s; "
+                        "continuing shutdown.",
+                        gpu_id,
+                    )
             self._groups.clear()
             try:
                 self._handle.Shutdown()
             except Exception:
-                pass
+                logger.exception(
+                    "DCGM hostengine Shutdown() failed (host=%s port=%d); "
+                    "continuing shutdown.",
+                    self._host,
+                    self._port,
+                )
             self._handle = None
             self._system = None
         # Drop the identity-map cache so a subsequent init()/use
@@ -452,7 +469,10 @@ class DcgmActuator:
 
             pynvml.nvmlShutdown()
         except Exception:
-            pass
+            logger.exception(
+                "pynvml.nvmlShutdown() failed during DcgmActuator shutdown; "
+                "continuing shutdown.",
+            )
 
     # ------------------------------------------------------------------
     # Stale-handle recovery
