@@ -338,6 +338,25 @@ impl ReasoningParser for BasicReasoningParser {
             reasoning_text: accumulated_reasoning,
         }
     }
+
+    fn finish_reasoning_stream(&mut self) -> ParserResult {
+        if self._buffer.is_empty() {
+            return ParserResult::default();
+        }
+
+        let buffered = std::mem::take(&mut self._buffer);
+        if self._in_reasoning {
+            ParserResult {
+                normal_text: String::new(),
+                reasoning_text: buffered,
+            }
+        } else {
+            ParserResult {
+                normal_text: buffered,
+                reasoning_text: String::new(),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -378,6 +397,34 @@ mod tests {
         let result = parser.parse_reasoning_streaming_incremental("<thi", &[]);
         assert_eq!(result.normal_text, "");
         assert_eq!(result.reasoning_text, "");
+    }
+
+    #[test] // REASONING.stream.4 — EOF finalizes a partial start marker as normal text
+    fn test_finish_reasoning_stream_flushes_partial_start_marker() {
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let result = parser.parse_reasoning_streaming_incremental("plain <th", &[]);
+        assert_eq!(result.normal_text, "plain ");
+        assert_eq!(result.reasoning_text, "");
+
+        let result = parser.finish_reasoning_stream();
+        assert_eq!(result.normal_text, "<th");
+        assert_eq!(result.reasoning_text, "");
+    }
+
+    #[test] // REASONING.stream.3 — EOF finalizes a partial end marker as reasoning text
+    fn test_finish_reasoning_stream_flushes_partial_end_marker() {
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let result = parser.parse_reasoning_streaming_incremental("<think>abc</th", &[]);
+        assert_eq!(result.normal_text, "");
+        assert_eq!(result.reasoning_text, "abc");
+
+        let result = parser.finish_reasoning_stream();
+        assert_eq!(result.normal_text, "");
+        assert_eq!(result.reasoning_text, "</th");
     }
 
     #[test] // REASONING.stream.3, REASONING.batch.1

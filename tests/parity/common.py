@@ -35,6 +35,22 @@ class ParseResult:
         }
 
 
+@dataclass
+class ReasoningResult:
+    """Uniform shape returned by every reasoning impl wrapper."""
+
+    reasoning_text: str | None = None
+    normal_text: str | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reasoning_text": self.reasoning_text,
+            "normal_text": self.normal_text,
+            "error": self.error,
+        }
+
+
 def _normalize_normal_text(v: Any) -> Any:
     """Treat any whitespace-only or None value as equivalent for comparison.
 
@@ -54,9 +70,11 @@ def _normalize_normal_text(v: Any) -> Any:
 
 def canonical(d: dict[str, Any]) -> str:
     """Canonical JSON for diffing: sorted keys, no whitespace, with empty-string ↔ None
-    normalization applied to `normal_text`."""
+    normalization applied to parser text fields."""
     if "normal_text" in d:
         d = {**d, "normal_text": _normalize_normal_text(d["normal_text"])}
+    if "reasoning_text" in d:
+        d = {**d, "reasoning_text": _normalize_normal_text(d["reasoning_text"])}
     return json.dumps(d, sort_keys=True, separators=(",", ":"))
 
 

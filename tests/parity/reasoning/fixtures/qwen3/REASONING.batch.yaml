@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: qwen3
+model_label: Qwen 3.x
+mode: batch
+cases:
+  REASONING.batch.1:
+    description: Single reasoning block
+    model_text: <think>thinking</think>
+    expected:
+      dynamo: &d_1
+        reasoning_text: thinking
+        normal_text: ''
+      vllm: *d_1
+      sglang: *d_1
+  REASONING.batch.2:
+    description: Reasoning followed by downstream tool-call text
+    model_text: |-
+      <think>choose the weather tool</think><tool_call>{"name":"get_weather","arguments":{"city":"SF"}}</tool_call>
+    expected:
+      dynamo: &d_2
+        reasoning_text: choose the weather tool
+        normal_text: <tool_call>{"name":"get_weather","arguments":{"city":"SF"}}</tool_call>
+      vllm: *d_2
+      sglang: *d_2
+  REASONING.batch.3:
+    description: Reasoning followed by normal answer text
+    model_text: <think>compute it</think>The answer is 42.
+    expected:
+      dynamo: &d_3
+        reasoning_text: compute it
+        normal_text: The answer is 42.
+      vllm: *d_3
+      sglang: *d_3
+  REASONING.batch.5:
+    description: Missing end marker keeps the remaining text as reasoning
+    model_text: <think>partial reasoning
+    expected:
+      dynamo: &d_5
+        reasoning_text: partial reasoning
+        normal_text: ''
+      vllm: *d_5
+      sglang: *d_5
+  REASONING.batch.6:
+    description: Empty reasoning block
+    model_text: <think></think>Direct answer.
+    expected:
+      dynamo: &d_6
+        reasoning_text: ''
+        normal_text: Direct answer.
+      vllm: *d_6
+      sglang: *d_6
+  REASONING.batch.7:
+    description: Complex reasoning content with Unicode and newlines
+    model_text: |-
+      <think>Line 1
+      Unicode: café
+      JSON-ish: {"x": [1, true]}</think>Done.
+    expected:
+      dynamo: &d_7
+        reasoning_text: |-
+          Line 1
+          Unicode: café
+          JSON-ish: {"x": [1, true]}
+        normal_text: Done.
+      vllm: *d_7
+      sglang: *d_7
+  REASONING.batch.8:
+    description: Empty input
+    model_text: ''
+    expected:
+      dynamo: &d_8
+        reasoning_text: ''
+        normal_text: ''
+      vllm: *d_8
+      sglang: *d_8
+  REASONING.batch.9:
+    description: Multiple reasoning spans are concatenated
+    model_text: <think>first</think> middle <think>second</think> done
+    expected:
+      dynamo: &d_9
+        reasoning_text: firstsecond
+        normal_text: middle  done
+      vllm:
+        reasoning_text: first
+        normal_text: ' middle <think>second</think> done'
+        reason: vLLM batch parser stops after the first reasoning span.
+      sglang:
+        reasoning_text: first
+        normal_text: ' middle <think>second</think> done'
+        reason: SGLang batch parser stops after the first reasoning span.

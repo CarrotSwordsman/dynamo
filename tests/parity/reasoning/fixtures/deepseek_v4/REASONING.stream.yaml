@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v4
+model_label: DeepSeek V4
+mode: stream
+cases:
+  REASONING.stream.1:
+    description: Single reasoning block across chunks
+    chunks:
+    - <think>thin
+    - king</think>answer
+    expected:
+      dynamo: &d_s1
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        reasoning_text: <think>thinking
+        normal_text: answer
+        reason: vLLM streaming parser preserves the start marker in this chunked stream shape.
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+  REASONING.stream.3:
+    description: End marker split across chunks
+    chunks:
+    - <think>thinking</th
+    - ink>answer
+    expected:
+      dynamo: &d_s3
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        reasoning_text: <think>thinking</think>answer
+        normal_text: ''
+        reason: vLLM streaming parser does not recover this split end marker shape.
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'

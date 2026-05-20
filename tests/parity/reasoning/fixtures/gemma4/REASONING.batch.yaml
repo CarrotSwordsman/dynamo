@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: gemma4
+model_label: Gemma 4
+mode: batch
+cases:
+  REASONING.batch.1:
+    description: Gemma thought channel with role label stripped
+    model_text: |-
+      <|channel>thought
+      step one
+      step two<channel|>The answer is 42.
+    expected:
+      dynamo: &d_1
+        reasoning_text: |-
+          step one
+          step two
+        normal_text: The answer is 42.
+      vllm: *d_1
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
+  REASONING.batch.3:
+    description: No reasoning markers pass through as normal text
+    model_text: just a plain answer
+    expected:
+      dynamo: &d_3
+        reasoning_text: ''
+        normal_text: just a plain answer
+      vllm: *d_3
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
+  REASONING.batch.5:
+    description: Open thought channel without close treats suffix as reasoning
+    model_text: |-
+      intro <|channel>thought
+      partial
+    expected:
+      dynamo: &d_5
+        reasoning_text: partial
+        normal_text: 'intro '
+      vllm:
+        reasoning_text: partial
+        normal_text: ''
+        reason: vLLM drops text before an open Gemma reasoning channel.
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'

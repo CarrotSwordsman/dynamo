@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: granite
+model_label: Granite
+mode: stream
+cases:
+  REASONING.stream.1:
+    description: Granite thought-process marker across chunks
+    chunks:
+    - "Here's my thought process: I need "
+    - "to reason. Here's my response: Final answer."
+    expected:
+      dynamo:
+        reasoning_text: ' I need to reason. '
+        normal_text: ' Final answer.'
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'granite'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'granite'
+  REASONING.stream.2:
+    description: Start marker split across chunks
+    chunks:
+    - "Here's my"
+    - " thought process: thinking Here's my response: answer"
+    expected:
+      dynamo:
+        reasoning_text: ' thinking '
+        normal_text: ' answer'
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'granite'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'granite'

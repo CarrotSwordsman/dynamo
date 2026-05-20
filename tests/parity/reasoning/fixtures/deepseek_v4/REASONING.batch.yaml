@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v4
+model_label: DeepSeek V4
+mode: batch
+cases:
+  REASONING.batch.1:
+    description: Single reasoning block
+    model_text: <think>thinking</think>
+    expected:
+      dynamo: &d_1
+        reasoning_text: thinking
+        normal_text: ''
+      vllm: *d_1
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+  REASONING.batch.3:
+    description: Reasoning followed by normal answer text
+    model_text: <think>thinking</think>answer
+    expected:
+      dynamo: &d_3
+        reasoning_text: thinking
+        normal_text: answer
+      vllm: *d_3
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'
+  REASONING.batch.5:
+    description: Missing end marker keeps the remaining text as reasoning
+    model_text: <think>partial reasoning
+    expected:
+      dynamo: &d_5
+        reasoning_text: partial reasoning
+        normal_text: ''
+      vllm: *d_5
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'deepseek_v4'

@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: mistral
+model_label: Mistral / Magistral
+mode: stream
+cases:
+  REASONING.stream.1:
+    description: Mistral THINK block across chunks
+    chunks:
+    - '[THINK]thin'
+    - 'king[/THINK]answer'
+    expected:
+      dynamo: &d_s1
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        reasoning_text: '[THINK]thinking'
+        normal_text: answer
+        reason: vLLM streaming parser preserves the Mistral start marker in this chunked stream shape.
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+  REASONING.stream.3:
+    description: End marker split across chunks
+    chunks:
+    - '[THINK]thinking[/TH'
+    - 'INK]answer'
+    expected:
+      dynamo: &d_s3
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        reasoning_text: '[THINK]thinking[/THINK]answer'
+        normal_text: ''
+        reason: vLLM streaming parser does not recover this split Mistral end marker shape.
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'

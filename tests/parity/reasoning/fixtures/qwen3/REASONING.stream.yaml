@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: qwen3
+model_label: Qwen 3.x
+mode: stream
+cases:
+  REASONING.stream.1:
+    description: Single reasoning block across chunks
+    chunks:
+    - <think>thin
+    - king</think>
+    - answer
+    expected:
+      dynamo: &d_s1
+        reasoning_text: thinking
+        normal_text: answer
+      vllm: *d_s1
+      sglang: *d_s1
+  REASONING.stream.2:
+    description: Start marker split across chunks
+    chunks:
+    - <th
+    - ink>thinking</think>answer
+    expected:
+      dynamo: &d_s2
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        reasoning_text: <think>thinking
+        normal_text: answer
+        reason: vLLM streaming parser preserves the start marker when it is split across chunks.
+      sglang: *d_s2
+  REASONING.stream.3:
+    description: End marker split across chunks
+    chunks:
+    - <think>thinking</th
+    - ink>answer
+    expected:
+      dynamo: &d_s3
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        reasoning_text: thinking</think>answer
+        normal_text: ''
+        reason: vLLM streaming parser does not recover this split end marker shape.
+      sglang:
+        reasoning_text: thinking</think>answer
+        normal_text: ''
+        reason: SGLang streaming parser does not recover this split end marker shape.
+  REASONING.stream.4:
+    description: Plain text never enters reasoning mode
+    chunks:
+    - plain
+    - ' answer'
+    expected:
+      dynamo: &d_s4
+        reasoning_text: ''
+        normal_text: plain answer
+      vllm:
+        reasoning_text: plain answer
+        normal_text: ''
+        reason: vLLM Qwen streaming parser treats text before a reasoning end marker as reasoning; serving may bypass it when thinking is disabled.
+      sglang: *d_s4

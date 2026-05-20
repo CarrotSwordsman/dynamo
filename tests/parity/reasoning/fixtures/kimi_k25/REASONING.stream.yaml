@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: kimi_k25
+model_label: Kimi K2.5
+mode: stream
+cases:
+  REASONING.stream.1:
+    description: Force-reasoning stream exits on closing think tag
+    chunks:
+    - thinking
+    - </think>answer
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.stream.2:
+    description: Opening think marker split across chunks
+    chunks:
+    - <thi
+    - nk>thinking</think>answer
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.stream.3:
+    description: Tool-call section marker split across chunks exits reasoning
+    chunks:
+    - thinking <|tool_cal
+    - ls_section_begin|>tool text
+    expected:
+      dynamo:
+        reasoning_text: 'thinking '
+        normal_text: <|tool_calls_section_begin|>tool text
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'

@@ -7,6 +7,7 @@
 Examples:
     python3 tests/parity/generate_parity_table.py parser --html > tests/parity/parser/PARITY.html
     python3 tests/parity/generate_parity_table.py parser --mode stream > tests/parity/parser/PARITY.stream.md
+    python3 tests/parity/generate_parity_table.py reasoning --html > tests/parity/reasoning/PARITY.html
 """
 
 from __future__ import annotations
@@ -18,6 +19,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from tests.parity.parser import table as parser_table  # noqa: E402
+from tests.parity.reasoning import table as reasoning_table  # noqa: E402
+
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
@@ -25,14 +29,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "stage",
-        choices=("parser",),
+        choices=("parser", "reasoning"),
         help="Parity stage to render.",
     )
     args, rest = parser.parse_known_args(argv)
 
-    if args.stage == "parser":
-        from tests.parity.parser import table
-
+    table = parser_table if args.stage == "parser" else reasoning_table
     table.main(rest)
 
 

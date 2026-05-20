@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: mistral
+model_label: Mistral / Magistral
+mode: batch
+cases:
+  REASONING.batch.1:
+    description: Mistral THINK block
+    model_text: '[THINK]thinking[/THINK]answer'
+    expected:
+      dynamo: &d_1
+        reasoning_text: thinking
+        normal_text: answer
+      vllm: *d_1
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+  REASONING.batch.5:
+    description: Force-reasoning parser treats unterminated text as reasoning
+    model_text: thinking without an end marker
+    expected:
+      dynamo: &d_5
+        reasoning_text: thinking without an end marker
+        normal_text: ''
+      vllm:
+        reasoning_text: ''
+        normal_text: thinking without an end marker
+        reason: vLLM Mistral parser only enters reasoning after the explicit start token.
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'

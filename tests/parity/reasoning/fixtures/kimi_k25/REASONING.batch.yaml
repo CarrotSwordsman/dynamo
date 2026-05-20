@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: kimi_k25
+model_label: Kimi K2.5
+mode: batch
+cases:
+  REASONING.batch.1:
+    description: Force-reasoning parser with explicit think tags
+    model_text: <think>thinking</think>answer
+    expected:
+      dynamo: &d_1
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.batch.2:
+    description: Tool-call section marker force-exits an open reasoning block
+    model_text: thinking <|tool_calls_section_begin|>tool text
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: <|tool_calls_section_begin|>tool text
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.batch.3:
+    description: Force-reasoning parser treats plain output as reasoning
+    model_text: thinking without explicit tags
+    expected:
+      dynamo:
+        reasoning_text: thinking without explicit tags
+        normal_text: ''
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'

@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: granite
+model_label: Granite
+mode: batch
+cases:
+  REASONING.batch.1:
+    description: Granite thought-process marker
+    model_text: "Here's my thought process: I need to reason. Here's my response: Final answer."
+    expected:
+      dynamo:
+        reasoning_text: 'I need to reason. '
+        normal_text: Final answer.
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'granite'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'granite'
+  REASONING.batch.3:
+    description: No markers pass through as normal text
+    model_text: This is just normal text.
+    expected:
+      dynamo:
+        reasoning_text: ''
+        normal_text: This is just normal text.
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'granite'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'granite'
+  REASONING.batch.5:
+    description: Start marker without response marker keeps suffix as reasoning
+    model_text: "Here's my thought process: unfinished thought"
+    expected:
+      dynamo:
+        reasoning_text: unfinished thought
+        normal_text: ''
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'granite'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'granite'

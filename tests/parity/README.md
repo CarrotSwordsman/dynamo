@@ -1,8 +1,9 @@
 # Cross-impl parity test suite
 
 Shared test infrastructure for diffing parser / preprocess / postprocess
-behavior across Dynamo, vLLM, and SGLang. Today only the parser stage
-is populated (`parser/`); other stages slot in as siblings as they land.
+behavior across Dynamo, vLLM, and SGLang. Tool call parser parity lives
+in `parser/`; reasoning parser parity lives in `reasoning/`. Other stages
+slot in as siblings as they land.
 
 > **Triaging a tool-call issue from a user?** Before stepping into the
 > parity harness, point them at
@@ -21,9 +22,9 @@ tests/parity/
 ├── README.md                       (this file)
 ├── conftest.py                     ← session-scoped fixtures (server boots, etc.)
 ├── common.py                       ← ParseResult, canonical-JSON diff, decode_arguments
-├── generate_parity_table.py        ← common table CLI: parser
+├── generate_parity_table.py        ← common table CLI: parser / reasoning
 ├── parity_table.html.j2            ← shared HTML template
-└── parser/
+├── parser/
     ├── fixtures/                   ← static YAML, generated from Dynamo as oracle
     │   └── <family>/PARSER.batch.yaml         (and per-top-level-case files like PARSER.batch.8.yaml; see Fixture file schema)
     ├── capture_parser_outputs.py     ← drift-check (default) or merge any impl's output into `expected.{dynamo,vllm,sglang}`
@@ -37,7 +38,31 @@ tests/parity/
     ├── server.py                   ← M3 subprocess boot helper
     ├── client.py                   ← M3 HTTP client (vllm + sglang)
     └── test_parity_e2e.py          ← M3 harness (server-stack parity over HTTP)
+└── reasoning/
+    ├── fixtures/                   ← static YAML contracts for REASONING.batch.* and REASONING.stream.*
+    ├── table.py                    ← reasoning table adapter
+    ├── dynamo.py                   ← Dynamo Rust reasoning parser via PyO3 binding
+    ├── vllm.py                     ← vLLM reasoning parser wrapper
+    ├── sglang.py                   ← SGLang reasoning parser wrapper
+    └── test_parity_reasoning.py    ← M2 harness for reasoning parser parity
 ```
+
+## Reasoning parity status
+
+The initial reasoning harness uses the same contract shape as `parser/`:
+each `REASONING.*.yaml` fixture records `expected.dynamo`,
+`expected.vllm`, and `expected.sglang`. A peer block can anchor to Dynamo,
+document a divergence, mark an expected error, or say the peer parser is
+unavailable.
+
+Generate the reasoning table from repo root:
+
+```bash
+python3 tests/parity/generate_parity_table.py reasoning --html > tests/parity/reasoning/PARITY.html
+```
+
+`PARITY.html` is for local review, like the parser table. The YAML fixtures
+remain the source of truth.
 
 ## Three methods (M1, M2, M3) — what each one really means
 
