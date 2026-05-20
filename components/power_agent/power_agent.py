@@ -21,7 +21,9 @@ import os
 import re
 import signal
 import threading
-from typing import Optional
+from typing import Callable, Optional
+
+from actuator import Actuator, DcgmActuator, NvmlActuator
 
 # Kubernetes and NVML — imported lazily with clear error messages
 try:
@@ -134,12 +136,23 @@ def _nvml_uuid(handle) -> str:
     return uuid.decode("ascii") if isinstance(uuid, bytes) else uuid
 
 
-def _record_managed_gpu_uuid(handle) -> None:
-    """Called from _apply_cap() after every successful NVML write."""
-    uuid = _nvml_uuid(handle)
+def _record_managed_gpu_by_uuid(uuid: str) -> None:
+    """Library-agnostic UUID persistence helper.
+
+    Called by both actuator paths after a successful cap write. The UUID
+    is the hardware-level identifier, identical whether obtained from
+    NVML (`nvmlDeviceGetUUID`) or DCGM (`DCGM_FI_DEV_UUID`). Separating
+    the persistence from the UUID source means DcgmActuator (PR B) can
+    record state without reaching into the NVML helpers.
+    """
     if uuid not in _previously_managed:
         _previously_managed.add(uuid)
         _persist_managed_gpus(_previously_managed)
+
+
+def _record_managed_gpu_uuid(handle) -> None:
+    """Called from _apply_cap() after every successful NVML write."""
+    _record_managed_gpu_by_uuid(_nvml_uuid(handle))
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +176,7 @@ class PowerAgentMetrics:
         if _PROMETHEUS_AVAILABLE and prometheus_port > 0:
             self.applied_limit_watts = Gauge(
                 "dynamo_power_agent_applied_limit_watts",
-                "NVML cap currently applied per physical GPU (watts).",
+                "Power cap currently applied per physical GPU (watts).",
                 labelnames=("gpu",),
             )
             self.multi_pod_gpu_total = Counter(
@@ -173,7 +186,10 @@ class PowerAgentMetrics:
             )
             self.apply_failures_total = Counter(
                 "dynamo_power_agent_apply_failures_total",
-                "Times the agent failed to set an NVML power cap.",
+                "Times an actuator write (NVML nvmlDeviceSetPowerManagementLimit "
+                "or DCGM dcgmConfigSet) raised — the cap was NOT applied to the "
+                "GPU. Distinct from policy fallbacks (tracked by "
+                "safe_default_applied_total) where the cap IS applied at safe-default.",
             )
             self.safe_default_applied_total = Counter(
                 "dynamo_power_agent_safe_default_applied_total",
@@ -181,8 +197,19 @@ class PowerAgentMetrics:
             )
             self.cap_clamped_total = Counter(
                 "dynamo_power_agent_cap_clamped_total",
-                "Times a requested cap was clamped to SKU NVML constraints.",
+                "Times a requested cap was clamped to per-SKU constraints.",
                 labelnames=("direction",),
+            )
+            # DCGM-only. Distinct from apply_failures_total because the
+            # underlying dcgmConfigSet succeeded (cap IS live on the GPU)
+            # — only the optional dcgmConfigEnforce that registers it as
+            # DCGM's target configuration for auto-reapply-after-reset
+            # failed. Stays at 0 on actuator=nvml and on
+            # actuator=dcgm + agent.dcgm.enforce=false.
+            self.dcgm_enforce_failures_total = Counter(
+                "dynamo_power_agent_dcgm_enforce_failures_total",
+                "Times dcgmConfigEnforce failed AFTER a successful dcgmConfigSet "
+                "(cap is live and tracked; auto-reapply-after-GPU-reset is not).",
             )
             try:
                 start_http_server(prometheus_port)
@@ -198,6 +225,7 @@ class PowerAgentMetrics:
             self.apply_failures_total = noop
             self.safe_default_applied_total = noop
             self.cap_clamped_total = noop
+            self.dcgm_enforce_failures_total = noop
 
 
 # ---------------------------------------------------------------------------
@@ -264,23 +292,71 @@ def _apply_cap(
 
 _shutdown = threading.Event()
 
+# Module-level reference to the active actuator. Populated by
+# `PowerAgent.__init__` (line ~478, immediately after `self._actuator.init()`),
+# read by the module-level `_handle_sigterm` because Python's `signal.signal`
+# hands the handler a `(signum, frame)` tuple with no other context. v1.6
+# wiring per review comment #6 (SIGTERM previously bypassed the actuator and
+# went straight to `pynvml`, leaving DCGM's target-config record stale on the
+# `actuator: dcgm` path).
+_active_actuator: Optional[Actuator] = None
+
 
 def _handle_sigterm(signum, frame):
+    """Restore default TGP on managed GPUs via the active actuator, then shut down.
+
+    Dispatches through `_active_actuator` so that:
+      - On `actuator: nvml`, `NvmlActuator.restore_default` runs the same
+        `nvmlDeviceSetPowerManagementLimit(default)` call the pre-v1.6 inline
+        handler did. Externally observable behaviour is unchanged on the NVML
+        path (`test_shutdown.py` covers this).
+      - On `actuator: dcgm`, `DcgmActuator.restore_default` runs
+        `dcgmConfigSet(mPowerLimit.val=default)` so the hostengine's
+        "target configuration" record stays consistent with the driver-level
+        cap. Pre-v1.6 the raw-NVML write would have desynced them: the driver
+        cap returns to default, but DCGM still holds the old cap as target
+        config, and DCGM would re-apply the *old* cap after the next GPU
+        reset/reinit. With `enforce: true` that mismatch was particularly
+        nasty because the auto-reapply specifically uses the (now-stale)
+        target config.
+
+    Defensive fallback: if `_active_actuator` is None (SIGTERM fires before
+    `PowerAgent.__init__` finished registering), we go through raw NVML so the
+    GPU isn't left at a custom cap — better to ungracefully restore via the
+    wrong library than to abandon a cap'd GPU.
+    """
     logger.info(
         "SIGTERM received — restoring default TGP on managed GPUs and shutting down."
     )
+    actuator = _active_actuator
     for gpu_idx in list(_managed_gpu_indices):
         try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
-            default_mw = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle)
-            pynvml.nvmlDeviceSetPowerManagementLimit(handle, default_mw)
-            logger.info(
-                "Restored GPU %d to default TGP (%d W)", gpu_idx, default_mw // 1000
-            )
+            if actuator is not None:
+                actuator.restore_default(gpu_idx)
+                logger.info(
+                    "Restored GPU %d to default TGP via %s actuator",
+                    gpu_idx,
+                    actuator.name,
+                )
+            else:
+                # Fallback: actuator not yet registered. Should be rare —
+                # only happens if SIGTERM fires during PowerAgent.__init__
+                # before the `_active_actuator = self._actuator` line runs.
+                handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+                default_mw = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle)
+                pynvml.nvmlDeviceSetPowerManagementLimit(handle, default_mw)
+                logger.warning(
+                    "Restored GPU %d via raw NVML (actuator not registered "
+                    "yet at SIGTERM time)",
+                    gpu_idx,
+                )
         except Exception as e:
             logger.exception("Failed to restore TGP on GPU %d: %s", gpu_idx, e)
     try:
-        pynvml.nvmlShutdown()
+        if actuator is not None:
+            actuator.shutdown()
+        else:
+            pynvml.nvmlShutdown()
     except Exception:
         pass
     _shutdown.set()
@@ -291,32 +367,51 @@ def _handle_sigterm(signum, frame):
 # ---------------------------------------------------------------------------
 
 
-def _restore_orphaned_gpus_on_startup(device_count: int) -> None:
+def _restore_orphaned_gpus_on_startup(actuator: Actuator) -> None:
     """Restore default TDP only on GPUs this agent previously capped AND that are now idle.
 
-    UUID-gating prevents touching caps applied by other workflows (different DGD,
-    manual nvidia-smi -pl, vendor firmware defaults).
+    Migrated from inline NVML to the actuator surface in v1.5 (Fix #5):
+    on the DCGM path, orphan recovery must write through `nvidia-dcgm`
+    too, not bypass it via raw NVML — otherwise the hostengine's
+    target-configuration record (and its reset/reinit auto-reapply
+    behaviour) drifts from the driver-level reality. Going through
+    `actuator.restore_default` keeps a single write path per actuator.
+
+    Two guards are preserved verbatim from the pre-v1.5 NVML-only
+    implementation:
+
+      1. UUID-gating — only touch GPUs whose UUID is in the persisted
+         `managed_gpus.json`. Prevents stepping on caps applied by
+         other workflows (different DGD, manual `nvidia-smi -pl`,
+         vendor firmware defaults).
+      2. `current_w < default_w` — only write when the cap is
+         actually below default. Skips a redundant privileged write
+         (and the audit-log entry it produces) when the previous
+         shutdown left the GPU at default, or when something else
+         already restored it.
+
+    The Protocol now carries `current_w` and `default_w` methods
+    expressly so the guard survives the migration; see actuator.py
+    `Actuator` Protocol and design doc §6.1.
     """
     global _previously_managed
     _previously_managed = _load_previously_managed_gpus()
-    for gpu_idx in range(device_count):
+    for gpu_idx in range(actuator.device_count()):
         try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
-            uuid = _nvml_uuid(handle)
+            uuid = actuator.get_uuid(gpu_idx)
             if uuid not in _previously_managed:
                 continue
-            procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-            if procs:
+            if actuator.list_running_pids(gpu_idx):
                 continue  # workload running — let normal reconcile handle it
-            current_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
-            default_mw = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle)
-            if current_mw < default_mw:
-                pynvml.nvmlDeviceSetPowerManagementLimit(handle, default_mw)
+            current_w = actuator.current_w(gpu_idx)
+            default_w = actuator.default_w(gpu_idx)
+            if current_w < default_w:
+                actuator.restore_default(gpu_idx)
                 logger.info(
                     "Restored orphaned cap on idle GPU %d (%d W → %d W).",
                     gpu_idx,
-                    current_mw // 1000,
-                    default_mw // 1000,
+                    current_w,
+                    default_w,
                 )
                 _previously_managed.discard(uuid)
         except Exception as e:
@@ -351,7 +446,12 @@ def _resolve_cap_for_gpu(
             gpu_idx,
             safe_default_watts,
         )
-        metrics.apply_failures_total.inc()
+        # Do NOT tick apply_failures_total here — the subsequent
+        # actuator.apply_cap(gpu_idx, safe_default_watts) call WILL
+        # make the cap live (at safe-default value), so a metric
+        # whose contract is "cap NOT live" would mislead operators
+        # whose dashboards alert on it. Policy-fallback is tracked
+        # by safe_default_applied_total below.
         metrics.safe_default_applied_total.inc()
         return safe_default_watts
 
@@ -386,7 +486,9 @@ def _resolve_cap_for_gpu(
             values[0],
             safe_default_watts,
         )
-        metrics.apply_failures_total.inc()
+        # Same rationale as the no-parseable-annotation branch above:
+        # annotation parse failure is policy-fallback (cap WILL be
+        # applied at safe default), not an actuator-write failure.
         metrics.safe_default_applied_total.inc()
         return safe_default_watts
 
@@ -403,6 +505,8 @@ class PowerAgent:
         node_name: Optional[str] = None,
         k8s_namespace: Optional[str] = None,
         prometheus_port: int = 0,
+        actuator: Optional[Actuator] = None,
+        actuator_factory: Optional[Callable[["PowerAgentMetrics"], Actuator]] = None,
     ) -> None:
         self.safe_default_watts = safe_default_watts
         self.node_name = node_name or os.environ.get("NODE_NAME", "")
@@ -414,13 +518,43 @@ class PowerAgent:
         if k8s_client is None:
             raise RuntimeError("kubernetes Python SDK is required — install kubernetes")
 
+        # NVML init still happens here for the NVML path because
+        # PR #9682's reconcile loop calls pynvml directly. The DCGM
+        # path runs `pynvml.nvmlInit()` again inside `DcgmActuator.init()`
+        # — `nvmlInit` is idempotent so the double call is harmless.
         pynvml.nvmlInit()
-        self.device_count = pynvml.nvmlDeviceGetCount()
+
+        # Bind the actuator. Resolution order: explicit instance >
+        # factory(metrics) > default NvmlActuator(metrics). The factory
+        # form is used by `main()`/`_make_actuator` because the
+        # PowerAgentMetrics object isn't constructible until __init__
+        # runs (the Prometheus server starts in its constructor).
+        # Tests typically pass an explicit MagicMock actuator instance.
+        if actuator is not None:
+            self._actuator: Actuator = actuator
+        elif actuator_factory is not None:
+            self._actuator = actuator_factory(self.metrics)
+        else:
+            self._actuator = NvmlActuator(self.metrics)
+        self._actuator.init()
+
+        # Register the actuator for the module-level SIGTERM handler
+        # (v1.6, per review comment #6). signal.signal-registered callbacks
+        # receive only (signum, frame) — they need a module-level handle to
+        # reach this actuator, and we set it as soon as init() succeeds so
+        # the window between actuator-ready and SIGTERM-handler-ready is as
+        # short as possible. Tests may overwrite this to inject a mock.
+        global _active_actuator
+        _active_actuator = self._actuator
+
+        self.device_count = self._actuator.device_count()
         logger.info(
-            "NVML initialized. %d GPU(s) found on this node.", self.device_count
+            "Actuator initialized: %s. %d GPU(s) found on this node.",
+            self._actuator.name,
+            self.device_count,
         )
 
-        _restore_orphaned_gpus_on_startup(self.device_count)
+        _restore_orphaned_gpus_on_startup(self._actuator)
 
         # K8s client
         try:
@@ -474,14 +608,34 @@ class PowerAgent:
         gpu_idx: int,
         uid_to_annotation: dict[str, Optional[str]],
     ) -> None:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
-        procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-        if not procs:
+        """Apply the policy-resolved cap for one GPU via the active actuator.
+
+        v1.6 wiring per review comment #4: routes through
+        `self._actuator.list_running_pids` and `self._actuator.apply_cap`
+        instead of inline `pynvml`. On `actuator: dcgm` this means the
+        cap write actually flows through `nvidia-dcgm` via `dcgmConfigSet`,
+        which is the entire point of selecting that actuator. Pre-v1.6
+        the reconcile loop hard-coded `pynvml.nvmlDeviceGetHandleByIndex`
+        + module-level `_apply_cap`, so `agent.actuator=dcgm` only changed
+        cold-start orphan recovery — the steady-state cap-write path
+        silently used NVML regardless.
+
+        The PID read still happens through the actuator because
+        `DcgmActuator.list_running_pids` performs the v1.5 UUID-keyed
+        cross-library identity lookup (DCGM gpuId -> UUID -> NVML index)
+        before calling `pynvml.nvmlDeviceGetComputeRunningProcesses`.
+        Bypassing the actuator here would skip that lookup and read PIDs
+        from the wrong physical GPU on any node where DCGM and NVML
+        disagree on enumeration order — see actuator.py
+        `_ensure_identity_map` and design doc §6.3 note 5.
+        """
+        pids = self._actuator.list_running_pids(gpu_idx)
+        if not pids:
             return  # no K8s workload on this GPU
 
         pod_annotations: list[tuple[str, Optional[str]]] = []
-        for proc in procs:
-            uid = _extract_pod_uid_from_cgroup(proc.pid)
+        for pid in pids:
+            uid = _extract_pod_uid_from_cgroup(pid)
             if uid is None:
                 continue  # non-K8s process — skip
             if uid in uid_to_annotation:
@@ -493,7 +647,7 @@ class PowerAgent:
         cap_w = _resolve_cap_for_gpu(
             gpu_idx, pod_annotations, self.safe_default_watts, self.metrics
         )
-        _apply_cap(handle, gpu_idx, cap_w, self.metrics)
+        self._actuator.apply_cap(gpu_idx, cap_w)
 
     def run(self) -> None:
         """Main reconcile loop. Blocks until SIGTERM."""
@@ -520,6 +674,29 @@ class PowerAgent:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+
+def _make_actuator(args, metrics) -> Actuator:
+    """Construct the actuator declared by `--actuator`.
+
+    Strict binary choice — `nvml` or `dcgm`. There is no auto-detection
+    and no runtime probe (see design doc §6.4 / §11 Q1). The operator
+    declares the actuator at chart-install time based on whether their
+    cluster runs `nvidia-dcgm`; this function honors that declaration
+    without modification. argparse's `choices=` guarantees `args.actuator`
+    is one of the two values below, but we re-check defensively so a
+    future refactor that loosens the choices doesn't silently no-op.
+    """
+    if args.actuator == "nvml":
+        return NvmlActuator(metrics=metrics)
+    if args.actuator == "dcgm":
+        return DcgmActuator(
+            host=args.dcgm_host,
+            port=args.dcgm_port,
+            enforce=args.dcgm_enforce,
+            metrics=metrics,
+        )
+    raise ValueError(f"Unknown actuator {args.actuator!r}; expected 'nvml' or 'dcgm'.")
 
 
 def main() -> None:
@@ -550,6 +727,81 @@ def main() -> None:
         default=int(os.environ.get("PROMETHEUS_PORT", "0")),
         help="Port for Prometheus metrics (0 = disabled).",
     )
+    parser.add_argument(
+        "--actuator",
+        choices=["nvml", "dcgm"],
+        default="nvml",
+        help=(
+            "Power-cap actuator. 'nvml' (default) calls "
+            "nvmlDeviceSetPowerManagementLimit directly — used on clusters "
+            "where the GPU Operator runs with dcgm.enabled=false (the "
+            "upstream default). 'dcgm' connects to the operator-managed "
+            "nvidia-dcgm hostengine via TCP and uses dcgmConfigSet — used "
+            "on clusters where the operator set dcgm.enabled=true. The "
+            "two are mutually exclusive: a given chart deployment uses "
+            "exactly one. The chart's agent.actuator value is the single "
+            "source of truth; no auto-detection."
+        ),
+    )
+    parser.add_argument(
+        "--dcgm-host",
+        type=str,
+        default=DcgmActuator.DEFAULT_HOST,
+        help=(
+            "DCGM hostengine host. Default matches the upstream GPU "
+            "Operator's nvidia-dcgm Service. Only consulted when "
+            "--actuator=dcgm."
+        ),
+    )
+    parser.add_argument(
+        "--dcgm-port",
+        type=int,
+        default=DcgmActuator.DEFAULT_PORT,
+        help=(
+            "DCGM hostengine port. Default matches the upstream nvidia-dcgm "
+            "hostPort. Only consulted when --actuator=dcgm."
+        ),
+    )
+
+    def _parse_bool_strict(x: str) -> bool:
+        """Strict bool parser — `treu` (typo) errors out, doesn't silently → False.
+
+        Pre-v1.6 used `str(x).lower() in ("true","1","yes")` which mapped any
+        unknown string to False, so `--dcgm-enforce treu` silently produced
+        enforce=False and the operator got no feedback on the typo. argparse
+        propagates the ArgumentTypeError as a parser exit-with-error, which is
+        what we want at chart-install / `kubectl describe pod` time.
+        """
+        s = str(x).strip().lower()
+        truthy = {"true", "1", "yes", "on"}
+        falsy = {"false", "0", "no", "off"}
+        if s in truthy:
+            return True
+        if s in falsy:
+            return False
+        raise argparse.ArgumentTypeError(
+            f"--dcgm-enforce expects one of " f"{sorted(truthy | falsy)!r}; got {x!r}"
+        )
+
+    parser.add_argument(
+        "--dcgm-enforce",
+        type=_parse_bool_strict,
+        default=False,
+        help=(
+            "Call dcgmConfigEnforce after each dcgmConfigSet. Default false "
+            "(set-and-forget, matches NVML's semantics). Set true to "
+            "register the cap as DCGM's target configuration so the "
+            "hostengine re-applies it automatically after a GPU reset or "
+            "reinit (DcgmConfigManager.h:113-117). This is the only "
+            "automatic re-enforcement DCGM provides; it is NOT a "
+            "tick-driven loop and does NOT make the cap survive Power "
+            "Agent restart (the agent's SIGTERM handler restores default "
+            "on every managed GPU regardless of --dcgm-enforce). Cost: "
+            "one extra DCGM RPC per agent reconcile per GPU. Recommended "
+            "for sites that see frequent GPU resets (XID-driven recovery, "
+            "partition rebuilds, manual nvidia-smi --gpu-reset)."
+        ),
+    )
     args = parser.parse_args()
 
     agent = PowerAgent(
@@ -557,6 +809,7 @@ def main() -> None:
         node_name=args.node_name,
         k8s_namespace=args.namespace,
         prometheus_port=args.prometheus_port,
+        actuator_factory=lambda metrics: _make_actuator(args, metrics),
     )
     agent.run()
 

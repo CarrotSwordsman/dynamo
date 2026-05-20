@@ -103,13 +103,19 @@ class TestMultiPodPolicy(unittest.TestCase):
             0, [("uid-1", None), ("uid-2", None)], SAFE_DEFAULT, self.m
         )
         self.assertEqual(cap, SAFE_DEFAULT)
-        self.assertEqual(self.m.apply_failures, 1)
+        # Policy-fallback ticks safe_default_applied only.
+        # apply_failures_total is reserved for actuator write failures
+        # ("cap NOT live"); the caller will apply the cap at the
+        # safe-default value, so the cap WILL be live.
+        self.assertEqual(self.m.apply_failures, 0)
         self.assertEqual(self.m.safe_default_applied, 1)
 
     def test_invalid_annotation_value(self):
         cap = _resolve_cap_for_gpu(0, [("uid-1", "not-a-number")], SAFE_DEFAULT, self.m)
         self.assertEqual(cap, SAFE_DEFAULT)
-        self.assertEqual(self.m.apply_failures, 1)
+        # Same rationale as test_no_parseable_annotation: parse
+        # failure is policy-fallback, not an apply failure.
+        self.assertEqual(self.m.apply_failures, 0)
         self.assertEqual(self.m.safe_default_applied, 1)
 
     def test_three_pods_all_agree(self):
