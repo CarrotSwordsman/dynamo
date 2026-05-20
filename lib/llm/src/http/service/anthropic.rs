@@ -155,8 +155,14 @@ async fn handler_anthropic_messages(
         endpoint: Endpoint::AnthropicMessages.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request =
-        Context::with_id_and_metadata(request, request_id, extract_metadata_from_headers(&headers));
+    let metadata = extract_metadata_from_headers(&headers).map_err(|err| {
+        anthropic_error(
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "invalid_request_error",
+            &err.to_string(),
+        )
+    })?;
+    let request = Context::with_id_and_metadata(request, request_id, metadata);
     let context = request.context();
 
     // Create connection handles

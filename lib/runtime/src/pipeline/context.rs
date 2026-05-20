@@ -66,7 +66,7 @@ impl<T: Send + Sync + 'static> Context<T> {
     }
 
     #[deprecated(
-        since = "0.0.0",
+        since = "1.1.2",
         note = "Use `Context::with_id_and_metadata` instead; pass `Default::default()` \
                 when you have no metadata to propagate. `with_id` will be removed once \
                 all call sites have been migrated."
