@@ -540,18 +540,28 @@ class DcgmActuator:
         return len(self._discovered_gpu_ids)
 
     def get_uuid(self, gpu_idx: int) -> str:
-        def _op() -> str:
-            import dcgm_agent
-            import dcgm_fields
+        """Read the GPU UUID via the synchronous device-info API.
 
+        Uses `DcgmSystem.discovery.GetGpuAttributes` (which wraps
+        `dcgmGetDeviceAttributes`) rather than `dcgmEntityGetLatestValues`
+        with `DCGM_FI_DEV_UUID`. The latter pulls from DCGM's field cache,
+        which only populates a field once *some* consumer subscribes to
+        it via `dcgmWatchFields`. On a freshly started hostengine with no
+        companion watcher (e.g. a standalone `nv-hostengine` in dev/CI,
+        or any production cluster whose `nvidia-dcgm-exporter`
+        configuration doesn't include UUID), the field cache returns the
+        string-blank sentinel `<<<NULL>>>`, which silently broke
+        cross-library identity mapping pre-v1.10. `GetGpuAttributes` is
+        the documented synchronous device-info call for static
+        descriptors (UUID, brand, name, serial, PCI BDF, MIG mode) and
+        does not depend on the field cache, so it works on any
+        hostengine the moment GPU discovery completes.
+        """
+
+        def _op() -> str:
             gpu_id = self._discovered_gpu_ids[gpu_idx]
-            vals = dcgm_agent.dcgmEntityGetLatestValues(
-                self._handle.handle,
-                dcgm_fields.DCGM_FE_GPU,
-                gpu_id,
-                [dcgm_fields.DCGM_FI_DEV_UUID],
-            )
-            raw = vals[0].value.str
+            attrs = self._system.discovery.GetGpuAttributes(gpu_id)
+            raw = attrs.identifiers.uuid
             return raw.decode("ascii") if isinstance(raw, bytes) else str(raw)
 
         return self._with_reconnect(_op)
@@ -607,23 +617,20 @@ class DcgmActuator:
         if self._dcgm_uuid_by_idx is not None and self._nvml_index_by_uuid is not None:
             return
 
-        import dcgm_agent
-        import dcgm_fields
         import pynvml
 
         def _read_dcgm_uuids() -> list[str]:
             # Indexed by gpu_idx -> _discovered_gpu_ids[gpu_idx].
             # Safe to re-iterate on _with_reconnect retry because
             # _discovered_gpu_ids is repopulated by init() on recovery.
+            # Uses GetGpuAttributes (synchronous device-info API) — see
+            # `get_uuid` docstring for why `dcgmEntityGetLatestValues +
+            # DCGM_FI_DEV_UUID` returns `<<<NULL>>>` on a fresh hostengine
+            # and would silently break the cross-library identity map.
             uuids: list[str] = []
             for gpu_id in self._discovered_gpu_ids:
-                vals = dcgm_agent.dcgmEntityGetLatestValues(
-                    self._handle.handle,
-                    dcgm_fields.DCGM_FE_GPU,
-                    gpu_id,
-                    [dcgm_fields.DCGM_FI_DEV_UUID],
-                )
-                raw = vals[0].value.str
+                attrs = self._system.discovery.GetGpuAttributes(gpu_id)
+                raw = attrs.identifiers.uuid
                 uuids.append(
                     raw.decode("ascii") if isinstance(raw, bytes) else str(raw)
                 )
@@ -665,83 +672,59 @@ class DcgmActuator:
             len(dcgm_uuids),
         )
 
+    def _power_limits(self, gpu_idx: int) -> "Any":
+        """Read all four DCGM power-limit fields in one RPC, via GetGpuAttributes.
+
+        `DcgmSystem.discovery.GetGpuAttributes` returns a
+        `c_dcgmDeviceAttributes_v3` struct whose `.powerLimits` member
+        carries `curPowerLimit`, `defaultPowerLimit`,
+        `enforcedPowerLimit`, `minPowerLimit`, `maxPowerLimit` — all
+        in watts. This consolidates `constraints_w` / `current_w` /
+        `default_w` onto the synchronous device-info API (same
+        rationale as `get_uuid`, see its docstring): the field-cache
+        API `dcgmEntityGetLatestValues` returns `DCGM_FP64_BLANK`
+        (= 140737488355328.0) for any field no DCGM consumer has
+        watched, which silently broke the v1.8 implementation on
+        every fresh hostengine. `GetGpuAttributes` works on any
+        hostengine the moment GPU discovery completes.
+        """
+
+        def _op() -> "Any":
+            gpu_id = self._discovered_gpu_ids[gpu_idx]
+            return self._system.discovery.GetGpuAttributes(gpu_id).powerLimits
+
+        return self._with_reconnect(_op)
+
     def constraints_w(self, gpu_idx: int) -> tuple[int, int]:
         """Return (min_w, max_w) — the SKU's settable power-cap range.
 
-        DCGM exposes these as separate fields (MIN=161, MAX=162);
-        values are in watts (not mW) per the DCGM exporter
-        conventions. Distinct from `_DEF=163` which is what
-        `restore_default` reads.
+        Reads `powerLimits.minPowerLimit` + `maxPowerLimit` from the
+        device-info API. Distinct from `defaultPowerLimit` (which
+        `restore_default` reads).
         """
-
-        def _op() -> tuple[int, int]:
-            import dcgm_agent
-            import dcgm_fields
-
-            gpu_id = self._discovered_gpu_ids[gpu_idx]
-            vals = dcgm_agent.dcgmEntityGetLatestValues(
-                self._handle.handle,
-                dcgm_fields.DCGM_FE_GPU,
-                gpu_id,
-                [
-                    dcgm_fields.DCGM_FI_DEV_POWER_MGMT_LIMIT_MIN,
-                    dcgm_fields.DCGM_FI_DEV_POWER_MGMT_LIMIT_MAX,
-                ],
-            )
-            return int(vals[0].value.dbl), int(vals[1].value.dbl)
-
-        return self._with_reconnect(_op)
+        pl = self._power_limits(gpu_idx)
+        return int(pl.minPowerLimit), int(pl.maxPowerLimit)
 
     def current_w(self, gpu_idx: int) -> int:
-        """Read field 160 (DCGM_FI_DEV_POWER_MGMT_LIMIT) — current cap in W.
+        """Return the GPU's current power cap in watts.
 
-        Values on this field are reported in watts per the DCGM-
-        exporter conventions. Distinct from `_DEF=163` (factory
-        default) and `_MIN/_MAX=161/162` (settable range). Used by
-        the orphan-recovery guard to skip writes that would no-op.
+        Reads `powerLimits.curPowerLimit`. Used by orphan-recovery
+        to skip writes that would no-op.
         """
-
-        def _op() -> int:
-            import dcgm_agent
-            import dcgm_fields
-
-            gpu_id = self._discovered_gpu_ids[gpu_idx]
-            vals = dcgm_agent.dcgmEntityGetLatestValues(
-                self._handle.handle,
-                dcgm_fields.DCGM_FE_GPU,
-                gpu_id,
-                [dcgm_fields.DCGM_FI_DEV_POWER_MGMT_LIMIT],
-            )
-            return int(vals[0].value.dbl)
-
-        return self._with_reconnect(_op)
+        return int(self._power_limits(gpu_idx).curPowerLimit)
 
     def default_w(self, gpu_idx: int) -> int:
-        """Read field 163 (DCGM_FI_DEV_POWER_MGMT_LIMIT_DEF) — factory default in W.
+        """Return the GPU's factory-default power limit in watts.
 
-        The byte-for-byte DCGM equivalent of NVML's
-        `nvmlDeviceGetPowerManagementDefaultLimit`. Distinct from
-        `_MAX=162` (max settable); on every shipped data-center SKU
-        the two are numerically equal, but reading the right field
-        keeps the DCGM path semantically aligned with NVML on
-        hypothetical future SKUs where default < max. See §11 Q5 +
+        Reads `powerLimits.defaultPowerLimit` — the byte-for-byte DCGM
+        equivalent of NVML's `nvmlDeviceGetPowerManagementDefaultLimit`.
+        Distinct from `maxPowerLimit` (max settable); on every shipped
+        data-center SKU the two are numerically equal, but reading the
+        right field keeps the DCGM path semantically aligned with NVML
+        on hypothetical future SKUs where default < max. See §11 Q5 +
         v1.4 changelog for the discussion.
         """
-
-        def _op() -> int:
-            import dcgm_agent
-            import dcgm_fields
-
-            gpu_id = self._discovered_gpu_ids[gpu_idx]
-            vals = dcgm_agent.dcgmEntityGetLatestValues(
-                self._handle.handle,
-                dcgm_fields.DCGM_FE_GPU,
-                gpu_id,
-                [dcgm_fields.DCGM_FI_DEV_POWER_MGMT_LIMIT_DEF],
-            )
-            return int(vals[0].value.dbl)
-
-        return self._with_reconnect(_op)
+        return int(self._power_limits(gpu_idx).defaultPowerLimit)
 
     # ------------------------------------------------------------------
     # Write methods
@@ -813,15 +796,23 @@ class DcgmActuator:
                 grp.AddGpu(gpu_id)
                 self._groups[gpu_idx] = grp
 
+            # DCGM_INT32_BLANK lives in `dcgmvalue` (NOT `dcgm_structs`)
+            # in the upstream pydcgm bindings — confirmed against DCGM
+            # 4.5.3 (`/shared/pydcgm/dcgmvalue.py:17`). Pre-v1.10 we
+            # reached for `dcgm_structs.DCGM_INT32_BLANK`, which doesn't
+            # exist there, and apply_cap raised AttributeError on the
+            # first cap write against a real hostengine.
+            import dcgmvalue
+
             cfg = dcgm_structs.c_dcgmDeviceConfig_v2()
             cfg.version = dcgm_structs.dcgmDeviceConfig_version2
             # Blank every field DCGM would otherwise reset out from
             # under us — we only intend to write the power limit.
-            cfg.mEccMode = dcgm_structs.DCGM_INT32_BLANK
-            cfg.mComputeMode = dcgm_structs.DCGM_INT32_BLANK
-            cfg.mPerfState.syncBoost = dcgm_structs.DCGM_INT32_BLANK
-            cfg.mPerfState.targetClocks.smClock = dcgm_structs.DCGM_INT32_BLANK
-            cfg.mPerfState.targetClocks.memClock = dcgm_structs.DCGM_INT32_BLANK
+            cfg.mEccMode = dcgmvalue.DCGM_INT32_BLANK
+            cfg.mComputeMode = dcgmvalue.DCGM_INT32_BLANK
+            cfg.mPerfState.syncBoost = dcgmvalue.DCGM_INT32_BLANK
+            cfg.mPerfState.targetClocks.smClock = dcgmvalue.DCGM_INT32_BLANK
+            cfg.mPerfState.targetClocks.memClock = dcgmvalue.DCGM_INT32_BLANK
             # mWorkloadPowerProfiles MUST be explicitly blanked. The
             # ctypes constructor zero-initializes the array, and DCGM's
             # config manager treats an all-zero workload-profile array
@@ -832,7 +823,7 @@ class DcgmActuator:
             for bitmap_index in range(
                 dcgm_structs.DCGM_WORKLOAD_POWER_PROFILE_ARRAY_SIZE
             ):
-                cfg.mWorkloadPowerProfiles[bitmap_index] = dcgm_structs.DCGM_INT32_BLANK
+                cfg.mWorkloadPowerProfiles[bitmap_index] = dcgmvalue.DCGM_INT32_BLANK
             cfg.mPowerLimit.type = dcgm_structs.DCGM_CONFIG_POWER_CAP_INDIVIDUAL
             cfg.mPowerLimit.val = effective_w
 

@@ -10,6 +10,7 @@
 | v1 | 2026-05-19 | Initial draft after field-engineer report that some customer sites set `dcgm.enabled=true` in their GPU Operator install. Promotes v2.4 §6 ("if we ever revisit") from speculative recovery plan to active design. Two-path actuator (NVML default, DCGM opt-in). |
 | v1.1 | 2026-05-19 | Author lock-ins after first review pass: `auto` Helm default + full-DCGM on the DCGM path + ctypes decode of `DCGM_FI_DEV_COMPUTE_PIDS`. **Both decisions reversed in v1.2** — see v1.2 entry for why. v1.1 is kept in the history as a record of the path not taken. |
 | v1.3 | 2026-05-19 | Resolves all four remaining open questions. **Q2 (substantive):** flip `--dcgm-enforce` default from `true` to `false`. Rationale: set-and-forget matches NVML's semantics, so an NVML→DCGM customer gets the *same* observable cap-write behaviour by default and opts in to the re-assertion property when they want it. With `enforce: false` the default DCGM path differs from NVML only by audit-log emission and writer-path routing (single-writer-through-nvidia-dcgm, §6.6), not by resilience. Customers who specifically want survival of external `nvidia-smi -pl` or Power Agent restarts set `enforce: true`. This also reduces hostengine CPU on the default path. **Q4 (recommendation stood):** per-GPU `DcgmGroup` for config writes. **Q5 (recommendation stood):** `restore_default` uses `mPowerLimit.val = max_w`. **Q6 (recommendation stood):** vendor pydcgm into the existing image (~5 MB) rather than rebasing on `nvcr.io/nvidia/cloud-native/dcgm` (+400 MB). §7 attribution table updated to reflect the new default — the "cap survives external clobbering" row now reads "Yes *if* `enforce: true` (opt-in); otherwise no (matches NVML)." §13 summary softens the DCGM-buys-resilience claim to be opt-in. |
+| v1.10 | 2026-05-20 | **First in-cluster DCGM e2e parity run on an 8×A100 SXM node** — three production defects discovered, all fixed. Pre-v1.10 the DCGM path had only ever been exercised against fully-mocked pydcgm in unit tests; the first run against a real `nv-hostengine 4.5.3` failed at the first identity-map build (`DcgmActuator: 8 GPU UUID(s) visible to DCGM are not visible to NVML in this process: ['<<<NULL>>>', ...]`). Root-causing showed two distinct latent bugs and one wrong import path, all in `DcgmActuator`. **#1 (UUID read returns blank sentinel):** `get_uuid` and `_ensure_identity_map._read_dcgm_uuids` read `DCGM_FI_DEV_UUID` (54) via `dcgmEntityGetLatestValues`. That API returns the latest *cached* value from DCGM's field cache, which is only populated when *some* DCGM consumer has previously subscribed via `dcgmWatchFields`. On a freshly-started hostengine with no companion watcher (our test rig; any production cluster whose `nvidia-dcgm-exporter` configuration doesn't watch UUID — the upstream default `dcp-metrics-included.csv` doesn't), the cache returns the string-blank sentinel `DCGM_STR_BLANK = "<<<NULL>>>"` (`/shared/pydcgm/dcgmvalue.py:24`). v1.10 routes UUID reads through `DcgmSystem.discovery.GetGpuAttributes(gpu_id).identifiers.uuid` — the synchronous device-info API that wraps `dcgmGetDeviceAttributes`, returning a `c_dcgmDeviceAttributes_v3` struct populated from the hostengine's discovery state without depending on the field cache. Confirmed against the e2e rig: NULL × 8 from the field-cache path, real UUIDs × 8 from `GetGpuAttributes`, matching NVML byte-for-byte. **#2 (power-limit reads return float blank sentinel):** same root cause hits `constraints_w` / `current_w` / `default_w`, all four of which read `DCGM_FI_DEV_POWER_MGMT_LIMIT{,_MIN,_MAX,_DEF}` (160/161/162/163) from the field cache. Probe confirmed every field returns `DCGM_FP64_BLANK = 140737488355328.0` (= 2^47); `apply_cap`'s clamp then escalated the requested 250 W *up* to the blank max_w and tried to write 2^47 W. v1.10 consolidates all four reads onto a new `_power_limits(gpu_idx)` helper that returns `GetGpuAttributes(gpu_id).powerLimits` (a `c_dcgmDevicePowerLimits_v1` struct with `curPowerLimit`, `defaultPowerLimit`, `enforcedPowerLimit`, `minPowerLimit`, `maxPowerLimit`, all in watts). One RPC instead of four, no field-cache dependency, integer watts directly (no `int(vals[0].value.dbl)` conversion). E2e probe values (`min=100, max=400, default=400`) match NVML byte-for-byte. **#3 (DCGM_INT32_BLANK in wrong module):** `apply_cap`'s workload-power-profile blanking loop reached for `dcgm_structs.DCGM_INT32_BLANK`; that constant lives in `dcgmvalue` (NOT `dcgm_structs`) per the actual pydcgm bindings — `apt-get install datacenter-gpu-manager-4-{core,cuda12}` lays it at `/shared/pydcgm/dcgmvalue.py:17`. Pre-v1.10 the first cap write raised `AttributeError: module 'dcgm_structs' has no attribute 'DCGM_INT32_BLANK'`. Fixed by adding `import dcgmvalue` and swapping all seven references. **Test infrastructure:** `_make_dcgm_modules` gains a `dcgmvalue` MagicMock with all four blank sentinels; `_make_gpu_attrs` extended to carry both `.identifiers.uuid` and `.powerLimits.{cur,default,enforced,min,max}PowerLimit`; `_wire_handle` wires `GetGpuAttributes(gid)` per-gpu_id; `_seed_constraints_and_uuid` simplified onto the unified GetGpuAttributes path. Added `modules["dcgm_agent"].dcgmEntityGetLatestValues.assert_not_called()` regression guards in 5 places — locks in "no more silent field-cache reads of static device info." 163/163 power-agent unit tests pass; pre-commit (black/flake8/codespell/ruff/EOF) clean. **E2e re-validation:** with v1.10 in place, the same 8×A100 rig produces `PASS: NvmlActuator and DcgmActuator agree on all probes (tolerance ±2.0 W)`, exit code 0, with `nvidia-smi` confirming `apply_cap(250)` → 250 W and `restore_default()` → 400 W on every GPU. |
 | v1.9 | 2026-05-20 | Fourth auto-reviewer pass — five findings, four accepted (#1 carryover). **#2 (Helm unittest broken):** `validate_actuator_test.yaml` and `validate_enforce_test.yaml` applied `matchRegex`/`notMatchRegex` to `spec.template.spec.containers[0].command`, which renders as a YAML list — helm-unittest 1.1.0 errors with `expect 'spec.template.spec.containers[0].command' to be a string`. Verified against the locally-installed plugin: pre-v1.9 was 8 failed / 16 passed, exactly matching the reviewer's count. Rewrote all 11 `matchRegex` assertions as `contains` (exact element match — stricter than the regex form, catches accidental flag-value drift) and all `notMatchRegex` cases as one-or-more `notContains` against each renderable value. New count: 24/24 passed. **#3 (apply_failures_total semantics):** `_resolve_cap_for_gpu` was incrementing `apply_failures_total.inc()` on policy-fallback paths (no parseable annotation / parse error) at `power_agent.py:442` and `:477`, but the subsequent `actuator.apply_cap(safe_default_watts)` makes the cap LIVE at safe-default value — so v1.8's HELP rewrite ("cap NOT live") was inconsistent. v1.9 removes both policy-path `inc()` calls and rewords the HELP to be precise: "Times an actuator write (NVML `nvmlDeviceSetPowerManagementLimit` or DCGM `dcgmConfigSet`) raised — cap was NOT applied. Distinct from policy fallbacks (tracked by `safe_default_applied_total`) where the cap IS applied at safe-default." `test_multi_pod_policy.py::test_no_parseable_annotation` and `::test_invalid_annotation_value` now assert `apply_failures == 0` (was `== 1`) — operator dashboards / alerts that fire on `apply_failures_total` now signal unambiguously "actuator failed, cap is gone," not "we couldn't parse an annotation." **#4 (design doc apply_cap pseudo-code drift):** §6.3 `apply_cap` sample (line 668) still showed the pre-v1.8 monolithic Set+Enforce-then-return-effective_w structure — the changelog explained the v1.8 split but the implementation sample still taught the bug. Rewrote the sample to show the actual v1.8 production structure: thin `apply_cap` (clamp + try/except absorption) → `_apply_cap_inner` (Set → `_record_managed_state` → optional Enforce-with-soft-failure) → `_record_managed_state` helper. **#5 (README values table drift):** detailed dev-mode section was fixed in v1.7 and v1.8 but the compact values table at `README.md:252-253` still said `dev.scriptConfigMap` holds only `power_agent.py` and `dev.image` only mentioned vllm-runtime/pynvml. Both rows now spell out the v1.7 `actuator.py` requirement and the v1.8 DCGM dev-image override inline. **#1 (carryover):** new files still untracked — user stages them. |
 | v1.8 | 2026-05-20 | Third auto-reviewer pass — five findings, four accepted (#1 carryover). **#2 (Set-OK-Enforce-fail untracked cap):** when `enforce: true`, if `dcgmConfigSet` succeeded but the follow-up `dcgmConfigEnforce` raised, `_apply_cap_inner` exited before the managed-state bookkeeping. The cap was LIVE on the GPU (DCGM invokes `nvmlDeviceSetPowerManagementLimit` synchronously inside Set) but `_managed_gpu_indices` didn't contain `gpu_idx`, the persistent UUID file wasn't updated — SIGTERM wouldn't restore it, next-startup orphan recovery wouldn't find it. v1.8 splits `_apply_cap_inner` into Set + bookkeeping + optional Enforce so Set-success unconditionally records managed state; Enforce-only failure is now a soft path that logs + ticks a new `dynamo_power_agent_dcgm_enforce_failures_total` counter (distinct from `apply_failures_total` because the cap IS live). New `test_enforce_failure_after_successful_set_still_tracks_managed_state` locks the contract. **#3 (DCGM dev mode dependency-incomplete):** README claimed `--set agent.actuator=dcgm` was sufficient for dev mode, but `dev.image` defaults to `vllm-runtime:1.0.1` which ships `pynvml` only. README + `values.yaml` now spell out the required `--set dev.image.repository=nvcr.io/nvidia/dynamo/power-agent --set dev.image.tag=v1.1.0` override (the prod image vendors pydcgm + libdcgm.so + has `PYTHONPATH`/`LD_LIBRARY_PATH` baked in). Script-iteration via ConfigMap mount still works because the dev-pod command invokes `/scripts/power_agent.py` explicitly. **#4 (stale pseudo-code drift):** three line edits in `power-agent-dual-actuator.md` so the §6/§9/§10 samples match the v1.7 production code — `restore_default` now shows `_apply_cap_inner` (not `apply_cap`), `--dcgm-enforce` shows `_parse_bool_strict` (not the v1.5 permissive lambda), and §9 says `/opt/dcgm/python` + `/opt/dcgm/lib` (matching Dockerfile:66-71) instead of the v1.0 `/opt/pydcgm/` placeholder. **#5 (observability NVML-specific):** Prometheus HELP strings in `PowerAgentMetrics` rewritten to actuator-neutral wording ("cap currently applied", "cap was NOT live"), and `NOTES.txt` now lists both `apply_failures_total` and the new `dcgm_enforce_failures_total` with semantic labels. **#1 (carryover):** new files still untracked — user stages them as separate logical commits. |
 | v1.7 | 2026-05-20 | Second auto-reviewer pass on the PR — seven findings, all accepted. **#4 (SIGTERM honesty):** `DcgmActuator.restore_default` now bypasses `apply_cap`'s failure-absorption (extracted `_apply_cap_inner` raises on DCGM write failure) so `_handle_sigterm`'s success log isn't a false-positive when `dcgmConfigSet(default)` fails. `apply_cap` contract unchanged. **#3 (reconnect coverage):** `_ensure_identity_map`'s DCGM UUID-read loop wrapped in `_with_reconnect` so first-call recovery folds into the same single-retry pattern every other DCGM read uses. **#2 (dev-mode):** dev-pod ConfigMap now mounts `actuator.py` alongside `power_agent.py`, and the dev-pod command line now plumbs `--actuator`/`--dcgm-host`/`--dcgm-port`/`--dcgm-enforce` (pre-v1.7 dev pods silently defaulted to NVML regardless of `agent.actuator=dcgm`). **#7 (template-time typo safety):** new `validateEnforce` helper rejects `--set agent.dcgm.enforce=treu` at `helm install` time (mirrors `_parse_bool_strict`'s allowlist). **#5 (doc fidelity):** corrected three stale samples in §6.1/§6.3/§10.2 (UUID-persistence ownership, UUID-keyed PID routing, `_make_actuator` metrics parameter). **#6 (version pinning):** install-example `image.tag` bumped `v1.0.0 → v1.1.0` in four READMEs to match the chart's `appVersion` (a v1.0.0 image lacks `actuator.py` and rejects the new CLI flags). **#1 (carryover):** new files still untracked — user stages them as separate logical commits. New regressions: `test_restore_default_raises_on_write_failure`, `test_identity_map_build_recovers_from_connection_not_valid`, and `validate_enforce_test.yaml` (8 valid + 4 typo classes + cross-validator interaction). |
@@ -415,16 +416,19 @@ class Actuator(Protocol):
         that _restore_orphaned_gpus_on_startup can preserve its
         `current_w < default_w` guard while migrating off raw NVML
         onto actuator.restore_default. NVML side wraps
-        nvmlDeviceGetPowerManagementLimit; DCGM side reads field 160
-        (DCGM_FI_DEV_POWER_MGMT_LIMIT).
+        nvmlDeviceGetPowerManagementLimit; DCGM side reads
+        powerLimits.curPowerLimit from GetGpuAttributes (v1.10 — the
+        pre-v1.10 field-cache read of DCGM_FI_DEV_POWER_MGMT_LIMIT
+        returned DCGM_FP64_BLANK on a fresh hostengine).
         """
 
     def default_w(self, gpu_idx: int) -> int:
         """Factory-default TGP (watts).
 
         NVML side: nvmlDeviceGetPowerManagementDefaultLimit. DCGM
-        side: field 163 (DCGM_FI_DEV_POWER_MGMT_LIMIT_DEF) — distinct
-        from field 162 (_MAX); see §6.3 note 4 and the v1.4 changelog.
+        side: powerLimits.defaultPowerLimit from GetGpuAttributes
+        (v1.10 — distinct from powerLimits.maxPowerLimit; see §6.3
+        note 4 and the v1.4 / v1.10 changelogs).
         """
     # ----- end v1.5 additions -----
 
@@ -597,21 +601,21 @@ class DcgmActuator:
         return len(self._discovered_gpu_ids)
 
     def get_uuid(self, gpu_idx: int) -> str:
-        # dcgm_fields.DCGM_FI_DEV_UUID = 54 (per dcgm_fields.py:154).
-        # dcgm_agent.dcgmEntityGetLatestValues returns a list of
-        # c_dcgmFieldValue_v1; .value.str is c_char * DCGM_MAX_STR_LENGTH.
-        import dcgm_agent
-        import dcgm_fields
+        # v1.10: route through the synchronous device-info API rather
+        # than the field cache. dcgmEntityGetLatestValues + DCGM_FI_DEV_UUID
+        # returns DCGM_STR_BLANK ("<<<NULL>>>") on a fresh hostengine
+        # with no companion watcher — confirmed against nv-hostengine
+        # 4.5.3 in our 8xA100 e2e parity run. GetGpuAttributes wraps
+        # dcgmGetDeviceAttributes (synchronous), returning a
+        # c_dcgmDeviceAttributes_v3 whose .identifiers.uuid carries
+        # the real UUID populated from the hostengine's discovery
+        # state. Same struct also carries powerLimits — see
+        # _power_limits below.
         gpu_id = self._discovered_gpu_ids[gpu_idx]
-        vals = dcgm_agent.dcgmEntityGetLatestValues(
-            self._handle.handle,
-            dcgm_fields.DCGM_FE_GPU,
-            gpu_id,
-            [dcgm_fields.DCGM_FI_DEV_UUID],
-        )
-        return vals[0].value.str.decode("ascii") if isinstance(
-            vals[0].value.str, bytes
-        ) else str(vals[0].value.str)
+        attrs = self._system.discovery.GetGpuAttributes(gpu_id)
+        return attrs.identifiers.uuid.decode("ascii") if isinstance(
+            attrs.identifiers.uuid, bytes
+        ) else str(attrs.identifiers.uuid)
 
     def list_running_pids(self, gpu_idx: int) -> list[int]:
         """Snapshot of compute PIDs on GPU — via NVML, even on the DCGM path.
@@ -654,21 +658,22 @@ class DcgmActuator:
         handle = pynvml.nvmlDeviceGetHandleByIndex(nvml_idx)
         return [p.pid for p in pynvml.nvmlDeviceGetComputeRunningProcesses(handle)]
 
-    def constraints_w(self, gpu_idx: int) -> tuple[int, int]:
-        # DCGM exposes DCGM_FI_DEV_POWER_MGMT_LIMIT_MIN/MAX as fields
-        # (per dcgm_fields.py:234-236). Power on these fields is
-        # reported in watts (not mW) per dcgm_fields_collectd.py:88-90.
-        import dcgm_agent
-        import dcgm_fields
+    def _power_limits(self, gpu_idx: int):
+        # v1.10: single source of truth for current_w / default_w /
+        # constraints_w. GetGpuAttributes returns a c_dcgmDevicePowerLimits_v1
+        # struct with curPowerLimit, defaultPowerLimit, enforcedPowerLimit,
+        # minPowerLimit, maxPowerLimit — all integer watts, populated
+        # synchronously from the hostengine's discovery state. Replaces
+        # the four pre-v1.10 dcgmEntityGetLatestValues calls against
+        # DCGM_FI_DEV_POWER_MGMT_LIMIT{,_MIN,_MAX,_DEF} (fields 160-163),
+        # all of which returned DCGM_FP64_BLANK (= 140737488355328.0 = 2^47)
+        # on a fresh hostengine in our e2e parity run.
         gpu_id = self._discovered_gpu_ids[gpu_idx]
-        vals = dcgm_agent.dcgmEntityGetLatestValues(
-            self._handle.handle,
-            dcgm_fields.DCGM_FE_GPU,
-            gpu_id,
-            [dcgm_fields.DCGM_FI_DEV_POWER_MGMT_LIMIT_MIN,
-             dcgm_fields.DCGM_FI_DEV_POWER_MGMT_LIMIT_MAX],
-        )
-        return int(vals[0].value.dbl), int(vals[1].value.dbl)
+        return self._system.discovery.GetGpuAttributes(gpu_id).powerLimits
+
+    def constraints_w(self, gpu_idx: int) -> tuple[int, int]:
+        pl = self._power_limits(gpu_idx)
+        return int(pl.minPowerLimit), int(pl.maxPowerLimit)
 
     def apply_cap(self, gpu_idx: int, watts: int) -> int:
         """Public Protocol entry. Clamps then delegates to _apply_cap_inner,
@@ -695,6 +700,11 @@ class DcgmActuator:
         """
         import pydcgm
         import dcgm_structs
+        # v1.10: DCGM_INT32_BLANK lives in dcgmvalue, NOT dcgm_structs
+        # — verified against /shared/pydcgm/dcgmvalue.py:17 in the
+        # DCGM 4.5.3 apt-installed bindings. Pre-v1.10 the import path
+        # raised AttributeError on the first cap write in our e2e run.
+        import dcgmvalue
 
         gpu_id = self._discovered_gpu_ids[gpu_idx]
 
@@ -714,13 +724,13 @@ class DcgmActuator:
             # Blank everything DCGM would otherwise reset out from
             # under us — see v1.5 review #1 for the
             # mWorkloadPowerProfiles ACTION_CLEAR rationale.
-            cfg.mEccMode = dcgm_structs.DCGM_INT32_BLANK
-            cfg.mComputeMode = dcgm_structs.DCGM_INT32_BLANK
-            cfg.mPerfState.syncBoost = dcgm_structs.DCGM_INT32_BLANK
-            cfg.mPerfState.targetClocks.smClock = dcgm_structs.DCGM_INT32_BLANK
-            cfg.mPerfState.targetClocks.memClock = dcgm_structs.DCGM_INT32_BLANK
+            cfg.mEccMode = dcgmvalue.DCGM_INT32_BLANK
+            cfg.mComputeMode = dcgmvalue.DCGM_INT32_BLANK
+            cfg.mPerfState.syncBoost = dcgmvalue.DCGM_INT32_BLANK
+            cfg.mPerfState.targetClocks.smClock = dcgmvalue.DCGM_INT32_BLANK
+            cfg.mPerfState.targetClocks.memClock = dcgmvalue.DCGM_INT32_BLANK
             for i in range(dcgm_structs.DCGM_WORKLOAD_POWER_PROFILE_ARRAY_SIZE):
-                cfg.mWorkloadPowerProfiles[i] = dcgm_structs.DCGM_INT32_BLANK
+                cfg.mWorkloadPowerProfiles[i] = dcgmvalue.DCGM_INT32_BLANK
             cfg.mPowerLimit.type = dcgm_structs.DCGM_CONFIG_POWER_CAP_INDIVIDUAL
             cfg.mPowerLimit.val = effective_w
 
@@ -783,37 +793,35 @@ class DcgmActuator:
         self._metrics.applied_limit_watts.labels(gpu=str(gpu_idx)).set(watts)
 
     def restore_default(self, gpu_idx: int) -> None:
-        """Restore factory-default TGP via DCGM_FI_DEV_POWER_MGMT_LIMIT_DEF.
+        """Restore factory-default TGP via powerLimits.defaultPowerLimit.
 
-        Why this and not constraints_w()[1]: DCGM exposes four distinct
-        power-limit fields (per dcgm_fields.py:232-238):
-            DCGM_FI_DEV_POWER_MGMT_LIMIT     = 160  current
-            DCGM_FI_DEV_POWER_MGMT_LIMIT_MIN = 161  min settable
-            DCGM_FI_DEV_POWER_MGMT_LIMIT_MAX = 162  max settable
-            DCGM_FI_DEV_POWER_MGMT_LIMIT_DEF = 163  factory default
+        Why this and not constraints_w()[1]: the DCGM device-attributes
+        struct exposes four distinct power-limit fields on
+        c_dcgmDevicePowerLimits_v1:
+            curPowerLimit       current cap
+            minPowerLimit       min settable
+            maxPowerLimit       max settable
+            defaultPowerLimit   factory default
+            enforcedPowerLimit  effective post-arbitration
 
-        The DEF field is the byte-for-byte equivalent of NVML's
+        defaultPowerLimit is the byte-for-byte equivalent of NVML's
         nvmlDeviceGetPowerManagementDefaultLimit, which is what the
         existing NVML restore path uses (power_agent.py:275-276 in the
         SIGTERM handler, and power_agent.py:312-314 in the orphan
         recovery on startup). On every shipped data-center SKU,
-        default == max, so DEF and MAX return the same value — but
-        that equality is a property of current SKUs, not a guarantee
-        of the API. Reading the right field (DEF) makes the DCGM
-        restore byte-for-byte equivalent to the NVML restore on
+        default == max, so the two attributes return the same value —
+        but that equality is a property of current SKUs, not a
+        guarantee of the API. Reading the right attribute keeps the
+        DCGM restore byte-for-byte equivalent to the NVML restore on
         hypothetical future SKUs where default < max (consumer-style
         cards with boost headroom).
+
+        v1.10: this came up in the e2e parity run too — the pre-v1.10
+        field-cache path returned DCGM_FP64_BLANK (2^47) for DEF=163,
+        and the cap write would have blown past the SKU's true max.
+        Routing through _power_limits closes that hole.
         """
-        import dcgm_agent
-        import dcgm_fields
-        gpu_id = self._discovered_gpu_ids[gpu_idx]
-        vals = dcgm_agent.dcgmEntityGetLatestValues(
-            self._handle.handle,
-            dcgm_fields.DCGM_FE_GPU,
-            gpu_id,
-            [dcgm_fields.DCGM_FI_DEV_POWER_MGMT_LIMIT_DEF],
-        )
-        default_w = int(vals[0].value.dbl)
+        default_w = int(self._power_limits(gpu_idx).defaultPowerLimit)
         # v1.7 review #4: route through _apply_cap_inner (not the
         # public apply_cap) so DCGM write failures propagate to
         # SIGTERM and orphan-recovery callers instead of being
@@ -1221,7 +1229,7 @@ demonstrably true from source.
 | Property | NVML | DCGM (`enforce: false`, default) | DCGM (`enforce: true`) |
 |---|---|---|---|
 | Per-GPU cap write | Yes | Yes (byte-equivalent — see §5.2) | Yes (byte-equivalent — see §5.2) |
-| SKU min/max clamp | Yes (`nvmlDeviceGetPowerManagementLimitConstraints`) | Yes (`DCGM_FI_DEV_POWER_MGMT_LIMIT_MIN/MAX`) | Yes (same) |
+| SKU min/max clamp | Yes (`nvmlDeviceGetPowerManagementLimitConstraints`) | Yes (`GetGpuAttributes().powerLimits.{min,max}PowerLimit` — v1.10) | Yes (same) |
 | Cap repaired after external `nvidia-smi -pl <higher>` between reconciles | **No** — next 15-s reconcile re-asserts | **No** — next 15-s reconcile re-asserts (DCGM has no continuous re-enforce loop; see §5.3) | **No** — same. `dcgmConfigEnforce` is one-shot at `Set` time, not a tick. The 15-s reconcile is the repair latency on both paths. |
 | Cap survives Power Agent restart | **No** — SIGTERM handler restores default (`power_agent.py:281-298`); UUID-gated orphan recovery restores on next startup | **No** — same SIGTERM/orphan-recovery path runs | **No** — same. `enforce: true` does not change the agent's SIGTERM behaviour. A future design that wanted persistent caps across restart would need to skip SIGTERM restore (see v1.5 changelog "rejected option (b)"). |
 | Cap survives GPU reset / reinit | **No** — driver clears the cap; agent doesn't notice until next reconcile (≤15 s) | **No** — `enforce: false` doesn't register the cap as target configuration | **Yes** — DCGM persists the cap as "target configuration" and re-applies it after GPU reset/reinit (`DcgmConfigManager.h:113-117`, `dcgm_test_apis.h:180-183`, `DcgmConfigManager.cpp:664`). **This is the only resilience property DCGM genuinely buys over NVML.** Useful on clusters with XID-driven recoveries, GB200 partition rebuilds, manual `nvidia-smi --gpu-reset`. |
@@ -1393,7 +1401,7 @@ opening after PR #9682 and the rest of the PR9369 split have merged
 Test additions in v1.4:
 - `test_dcgm_actuator.py::test_stale_handle_recovery` — kill the mock hostengine mid-`apply_cap`, assert `_with_reconnect` rebuilds and the second attempt succeeds; assert `self._groups` is empty after recovery.
 - `test_dcgm_actuator.py::test_stale_handle_persistent_failure` — kill the hostengine and keep it dead; assert the second attempt also fails and the exception propagates (no infinite retry).
-- `test_dcgm_actuator.py::test_restore_default_reads_def_field` — assert `restore_default` issues `dcgmEntityGetLatestValues` for field `163` (`_DEF`), not `162` (`_MAX`).
+- `test_dcgm_actuator.py::test_restore_default_reads_default_power_limit` — assert `restore_default` reads `GetGpuAttributes().powerLimits.defaultPowerLimit` (not `maxPowerLimit`), and that `dcgm_agent.dcgmEntityGetLatestValues` is NOT called (regression guard from v1.10 — the pre-v1.10 field-cache path was the load-bearing bug).
 
 Both PRs together add ~1,000 lines on top of PR #9682. PR A is mergeable
 independently; PR B depends on PR A.
@@ -1526,6 +1534,8 @@ Upstream DCGM source tree (https://github.com/NVIDIA/DCGM), paths repo-relative:
 - `dcgmlib/dcgmlib.linux_def` — exported symbols list. **Absence** of `dcgmGetDeviceProcesses` / `dcgmGetRunningProcesses` is the load-bearing evidence that the snapshot-PID API just doesn't exist in the public C API.
 - `testing/python3/dcgm_fields.py:231-239` — the four-field power-limit surface: `DCGM_FI_DEV_POWER_MGMT_LIMIT = 160` (current), `_MIN = 161`, `_MAX = 162` (max settable), `_DEF = 163` (**factory default**, the field that matches `nvmlDeviceGetPowerManagementDefaultLimit`). Load-bearing for v1.4 D fix.
 - `testing/python3/tests/test_connection.py:48-87` — kill nv-hostengine via `--term` or SIGKILL, next pydcgm API call raises `dcgmExceptionClass(DCGM_ST_CONNECTION_NOT_VALID)`. Load-bearing for v1.4 §6.3.1 stale-handle recovery pattern.
+- `pydcgm/dcgmvalue.py:14-26` (installed at `/shared/pydcgm/dcgmvalue.py` under `datacenter-gpu-manager-4-core`) — the seven blank sentinels (`DCGM_INT32_BLANK = 0x7FFFFFF0`, `DCGM_INT64_BLANK = 0x7FFFFFFFFFFFFFF0`, `DCGM_FP64_BLANK = 140737488355328.0` = 2^47, `DCGM_STR_BLANK = "<<<NULL>>>"`, plus three NOT_SUPPORTED variants). **Load-bearing for v1.10 #1+#2+#3:** (a) the live constants are in `dcgmvalue`, NOT `dcgm_structs` (#3), (b) field-cache reads of unwatched fields return the type-appropriate blank rather than raising (`DCGM_STR_BLANK` for UUID → #1, `DCGM_FP64_BLANK` for power-limit fields → #2), so calling code can't tell "no consumer ever watched this" apart from "value really is blank" without a blank check or routing to a synchronous API.
+- `dcgmlib/dcgm_agent.h` `dcgmGetDeviceAttributes` + `pydcgm/DcgmSystem.py` `DcgmSystemDiscovery.GetGpuAttributes(gpuId)` → `c_dcgmDeviceAttributes_v3{.identifiers.uuid, .powerLimits.{cur,default,enforced,min,max}PowerLimit, ...}`. **The synchronous device-info API that backs v1.10's UUID + power-limit reads.** Wraps a single hostengine RPC, returns populated from the discovery state without field-cache dependency.
 
 Upstream NVIDIA (unchanged from v2.4):
 - `nvidia/gpu-operator/values.yaml` — `dcgm.enabled: false` is still the default. Field-engineer evidence is about customer override, not upstream change.
@@ -1541,7 +1551,7 @@ defer's load-bearing premise (S2) doesn't hold. This doc adds the
 DCGM actuator for that subset, behind:
 
 - A clean `Actuator` Protocol that today's NVML code satisfies trivially.
-- A `DcgmActuator` that uses DCGM for the write path and SKU constraints (UUID via `DCGM_FI_DEV_UUID`, constraints via `DCGM_FI_DEV_POWER_MGMT_LIMIT_MIN/MAX`, write via `dcgmConfigSet`, optional `dcgmConfigEnforce` to register the cap as DCGM's target configuration for reset/reinit auto-reapply) and NVML for the snapshot-of-PIDs read (because DCGM has no public snapshot-PID API — see §6.3 note 2; the asymmetry is forced by upstream API shapes, not by design preference).
+- A `DcgmActuator` that uses DCGM for the write path and SKU constraints (UUID + power limits via `DcgmSystem.discovery.GetGpuAttributes(gpu_id)` — `.identifiers.uuid` and `.powerLimits.{cur,default,enforced,min,max}PowerLimit` — per the v1.10 fix that backed out the original field-cache path; write via `dcgmConfigSet` with `dcgmvalue.DCGM_INT32_BLANK` to leave non-power config fields untouched; optional `dcgmConfigEnforce` to register the cap as DCGM's target configuration for reset/reinit auto-reapply) and NVML for the snapshot-of-PIDs read (because DCGM has no public snapshot-PID API — see §6.3 note 2; the asymmetry is forced by upstream API shapes, not by design preference).
 - A **strict binary actuator selection** (`agent.actuator: nvml | dcgm`, default `nvml`) declared at chart-install time, with no runtime probe and no auto-detection (v1.2 reversal of v1.1's `auto` mode, per §6.4 and §6.6).
 - A **mutual-exclusion-by-construction guarantee** (§6.6): one chart, one DaemonSet, one pod per node, one actuator locked at startup. No two writer paths can co-exist by design; the chart's `validateActuator` guard catches typos at template time.
 - An honest accounting (§7, §8) of what DCGM actually buys, **rewritten in v1.5** after a second source-grounded review:
