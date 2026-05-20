@@ -1,15 +1,18 @@
 # Power Agent — Helm Chart Packaging Plan
 
 **Status:** Implemented — chart shipped at `deploy/helm/charts/power-agent/`
-(`Chart.yaml` `version: 1.1.0`, `appVersion: "1.1.0"`). v1.0.0 of the chart
+(`Chart.yaml` `version: 1.2.0`, `appVersion: "1.1.0"`). v1.0.0 of the chart
 landed in [PR #9682](https://github.com/ai-dynamo/dynamo/pull/9682) (PR 1a of
 the PR-9369 split, base of this plan); v1.1.0 added the DCGM actuator in
 [PR #9790](https://github.com/ai-dynamo/dynamo/pull/9790), whose end-to-end
-design is captured in `docs/design-docs/power-agent-dual-actuator.md`. This
-plan is the **chart-shape source of truth**; refresh v1.3 (below) aligns
-every stale §1–§8 reference with the v1.1.0 chart actually in the tree.
+design is captured in `docs/design-docs/power-agent-dual-actuator.md`; v1.2.0
+landed within PR #9682 as a second-pass hardening of the image-pinning
+validator (`image.digest` field + canonical-OCI-form renderer + strict
+SHA-256 / whitespace / digest-on-tag guards). This plan is the
+**chart-shape source of truth**; refresh v1.5 (below) aligns every stale
+§1–§8 reference with the v1.2.0 chart actually in the tree.
 **Author:** Kai Ma
-**Date:** 2026-05-19 (initial); refreshed 2026-05-20 (v1.3 PR9790 dual-actuator alignment, v1.4 second-pass review fixes)
+**Date:** 2026-05-19 (initial); refreshed 2026-05-20 (v1.3 PR9790 dual-actuator alignment, v1.4 second-pass review fixes, v1.5 PR9682 image.digest hardening)
 **Goal:** Replace the raw `deploy/power_agent/{daemonset,rbac,dev-pod}.yaml`
 manifests (shipped in [PR #9682](https://github.com/ai-dynamo/dynamo/pull/9682),
 PR 1a of the PR-9369 split) with a Helm chart at
@@ -27,6 +30,7 @@ configuration knobs and the validator surface grew.
 
 | Rev | Date | Changes |
 |-----|------|---------|
+| v1.5 | 2026-05-20 | **PR9682 image-pinning hardening — chart bumped 1.1.0 → 1.2.0.** Four reviewer findings on the initial `:latest` rejection (v1.0.0) and the `image.digest` follow-up: (1) **Truncated SHA-256 digests slipped through (medium)** — the regex was `^sha256:[0-9a-fA-F]{32,}$` so half-digests (32 hex chars, common pattern when an operator copies the first 8 bytes from `docker images --digests`) rendered as `repo@sha256:<truncated>`, which the kubelet would then fail to pull with an opaque manifest-mismatch error. Tightened to `{64}` exactly (SHA-256 is 32 bytes × 2 nybbles). Test matrix grew with the 32 / 63 / 65 hex-char negative cases. (2) **Whitespace-padded tags rendered raw (medium)** — the `latest` comparison trimmed the value but the renderer used the raw string, so `--set-string 'image.tag= v1.1.0 '` produced `image: "repo: v1.1.0 "` (invalid OCI ref). Choice: reject rather than silently normalize, so the operator sees their typo. Applies symmetrically to `image.digest`. (3) **§4.3 / §4.4 / §5.4 stale on image.digest (medium)** — §4.3 still showed the old `--set image.tag=sha256:abc...` form, §4.4 the old one-line validator helper, and §5.4 the old `24 passed` helm-unittest count. All three sections updated; §4.4 helper snippet now shows the full v1.2.0 validator with per-rule rationale; §5.4 expected count is `46 passed`. (4) **§4.1 / §4.2 stale on file count + helper list + values surface (medium)** — §4.1 said 13 files (omitted `.helmignore` and the new `validate_image_tag_test.yaml`), the `_helpers.tpl` line omitted the new `imageRef` helper, and the daemonset annotation didn't mention it routes through `imageRef`. §4.2 values snippet had only `image.tag` with no `image.digest`. Corrected to 14 files (7 templates + 3 helm-unittests + 4 root files), added `imageRef` to the helper list, added the `image.digest` field with full per-rule comment to the values snippet, and called out the daemonset's `image:` line as `imageRef`-routed. Helm-unittest grew from 33 → 46 cases (+13 across tag-vs-digest XOR, sha256-on-tag rejection, exact-64-hex digest enforcement, whitespace rejection on both fields, and the canonical-OCI `repo@digest` render). No design reversal — all four findings were "make the existing chart shape what the doc claims." |
 | v1 | 2026-05-19 | Initial plan. All five §6 decisions from the 2026-05-19 design session locked in: (§6.1) smaller scope — Power Agent only, planner-dev artifacts in PR9683/9687 untouched; (§6.2) Option α — fold chart into PR9682 directly; (§6.3) Option A — `dev-pod.yaml` ships as a gated template inside the same chart; (§6.4) delete the raw `deploy/power_agent/{daemonset,rbac,dev-pod}.yaml` in the same PR as the chart lands; (§6.5) this document. |
 | v1.1 | 2026-05-19 | Added §1.4 — End-to-end user flow. Pre-empts the "does this actually deliver a `helm something → ready to run` experience" question by making the post-plan three-command flow (2 × `helm install` + 1 × `kubectl apply` for the workload DGD) explicit, and by mapping every infrastructure primitive a power-aware planner needs to the chart that installs it. No decision change; doc-only refinement. |
 | v1.4 | 2026-05-20 | Second-pass review on the v1.3 refresh — five findings, all accepted. (1) **Status header self-contradiction (medium):** v1.3 claimed v1.1.0 added DCGM "without changing the values surface" but §4.2 explicitly extends it; reworded to "extends the values surface … and §4.4's helper set." (2) **§4.2 dev-block comment stale (major):** the inline `values.yaml` example in §4.2 still showed the v1.0.0 single-file `kubectl create configmap` recipe, contradicting both `values.yaml` on disk and §5.3.1. Updated to the actual two-file recipe (`power_agent.py` + `actuator.py`) and added the DCGM dev-image override note. `dev.namespaceRestrictedOverride: false` is now inline in the §4.2 block too, so the standalone `namespaceRestrictedOverride` snippet at the tail of §4.4 is collapsed to a one-sentence pointer rather than a redundant code block. (3) **§4.4 helm-unittest coverage overstated (medium):** v1.3 said `validate_actuator_test.yaml` covers "accidental list" and `validate_enforce_test.yaml` covers `False!` / `disabled` — neither matches the actual test files. Rewrote the coverage prose to match the real cases verified by reading the YAML: 10 actuator tests (happy: default / explicit-nvml / dcgm-default / dcgm-overrides / nvml-omits-dcgm-flags; sad: `NVML` / `DCGM` / `auto` / `typo` / empty), 14 enforce tests (9 happy spellings incl. `"TRUE"`; sad: `treu` / `enabled` / `2` / empty; 1 cross-validator nvml-skip-on-typo). Total 24, matching the §5.4 `helm unittest` expected output. (4) **§5.4 positive `helm template` overlays unrunnable (major):** the four positive overlays in v1.3 didn't include `--set image.tag=v1.1.0`, so each would fail fast on `validateImageTag` before exercising the overlay under test. Rewrote all four as explicit `helm template` commands carrying the tag; the negative "missing tag" case is now gate 3 only (and explicitly the only gate that omits the tag). Gates 4–6 also gain the tag so each isolates the validator under test. (5) **v1.3 changelog still named an internal-dev-environment-setup doc not tracked upstream (low):** v1.3 already removed every live reference but kept the filename in its own changelog summary; v1.4 rewrites the changelog text to describe it as "an internal dev-environment-setup doc not tracked upstream" without naming the file, closing the reviewer's "zero internal-dev-artifact references upstream" ask. No design changes in v1.4 — all five findings were doc-fidelity / runnability fixes on the v1.3 refresh. |
@@ -377,28 +381,32 @@ against the decisions recorded here.
 
 ```
 deploy/helm/charts/power-agent/
-├── Chart.yaml                       # name: power-agent, version: 1.1.0, appVersion: "1.1.0"
-├── README.md                        # install + values table + uninstall + troubleshooting
-├── values.yaml                      # see §4.2
-├── .helmignore                      # copied verbatim from snapshot chart
+├── Chart.yaml                          # name: power-agent, version: 1.2.0, appVersion: "1.1.0"
+├── README.md                           # install + values table + uninstall + troubleshooting
+├── values.yaml                         # see §4.2
+├── .helmignore                         # copied verbatim from snapshot chart
 ├── templates/
-│   ├── _helpers.tpl                 # power-agent.{name,fullname,labels,selectorLabels,serviceAccountName,validateImageTag,validateMutex,validateActuator,validateEnforce,effectiveNamespaceRestricted}
-│   ├── NOTES.txt                    # post-install hints (verify DS rollout, check metrics endpoint, kubectl logs)
-│   ├── serviceaccount.yaml          # gated on .Values.serviceAccount.create
-│   ├── role.yaml                    # Role OR ClusterRole based on power-agent.effectiveNamespaceRestricted
-│   ├── rolebinding.yaml             # RoleBinding OR ClusterRoleBinding (same toggle)
-│   ├── daemonset.yaml               # gated on .Values.daemonset.enabled (default true)
-│   └── dev-pod.yaml                 # gated on .Values.dev.enabled (default false); ConfigMap created externally
-└── tests/                           # helm-unittest suite — required validation gate as of v1.1.0
-    ├── validate_actuator_test.yaml  # asserts validateActuator rejects unknown actuator strings at template time
-    └── validate_enforce_test.yaml   # asserts validateEnforce rejects non-allowlisted booleans (e.g. `treu`)
+│   ├── _helpers.tpl                    # power-agent.{name,fullname,chart,labels,selectorLabels,serviceAccountName,validateImageTag,imageRef,validateMutex,validateActuator,validateEnforce,effectiveNamespaceRestricted}
+│   ├── NOTES.txt                       # post-install hints (verify DS rollout, check metrics endpoint, kubectl logs)
+│   ├── serviceaccount.yaml             # gated on .Values.serviceAccount.create
+│   ├── role.yaml                       # Role OR ClusterRole based on power-agent.effectiveNamespaceRestricted
+│   ├── rolebinding.yaml                # RoleBinding OR ClusterRoleBinding (same toggle)
+│   ├── daemonset.yaml                  # gated on .Values.daemonset.enabled (default true); image rendered via power-agent.imageRef
+│   └── dev-pod.yaml                    # gated on .Values.dev.enabled (default false); ConfigMap created externally
+└── tests/                              # helm-unittest suite — required validation gate as of v1.1.0
+    ├── validate_actuator_test.yaml     # asserts validateActuator rejects unknown actuator strings at template time
+    ├── validate_enforce_test.yaml      # asserts validateEnforce rejects non-allowlisted booleans (e.g. `treu`)
+    └── validate_image_tag_test.yaml    # (v1.2.0) asserts validateImageTag rejects unset / `latest` / digest-on-tag / non-`sha256:<64hex>` digest / whitespace, and that imageRef renders the canonical {repo}:{tag} or {repo}@{digest} forms
 ```
 
-13 files total (7 templates + 2 helm-unittests + 4 root files). ~1,430 LOC
-across chart + tests for v1.1.0 (the v1.0.0 baseline was ~880 LOC; PR9790
-adds the DCGM actuator wiring on `daemonset.yaml` / `dev-pod.yaml` /
-`_helpers.tpl` plus the two helm-unittest files and the corresponding
-`values.yaml` / `README.md` expansion). No PVC, no seccomp, no config
+14 files total (7 templates + 3 helm-unittests + 4 root files: `Chart.yaml`,
+`README.md`, `values.yaml`, `.helmignore`). ~1,700 LOC across chart + tests
+for v1.2.0 (v1.0.0 baseline was ~880 LOC; v1.1.0 PR9790 added DCGM actuator
+wiring on `daemonset.yaml` / `dev-pod.yaml` / `_helpers.tpl` plus the
+`validate_{actuator,enforce}_test.yaml` files; v1.2.0 added `image.digest`
+to `values.yaml`, the `validateImageTag` rewrite + new `imageRef` helper in
+`_helpers.tpl`, the `validate_image_tag_test.yaml` suite, and the
+corresponding README + this doc updates). No PVC, no seccomp, no config
 ConfigMap — all 8 CLI knobs the agent's `main()` exposes
 (`--safe-default-watts`, `--node-name`, `--namespace`, `--prometheus-port`,
 `--actuator`, `--dcgm-host`, `--dcgm-port`, `--dcgm-enforce`; verified
@@ -415,9 +423,20 @@ against `power_agent.py:706-804`) pass cleanly via `command:` and `env:`.
 
 image:
   repository: nvcr.io/nvidia/dynamo/power-agent
-  # REQUIRED. Pin to a release tag or sha256 digest. No default to avoid the
-  # `:latest` reproducibility footgun CodeRabbit flagged on PR #9682.
+  # Pin via tag OR digest — exactly one must be set (mutually exclusive,
+  # enforced by power-agent.validateImageTag). No default on `tag` to avoid
+  # the `:latest` reproducibility footgun CodeRabbit flagged on PR #9682.
+  # `helm install` fails fast at template time if both are empty (or both set).
   tag: ""
+  # Content-addressed digest. When set, the image renders as
+  # `{repository}@{digest}` via the power-agent.imageRef helper — the
+  # canonical OCI digest form. Must match `sha256:<64 hex chars>` exactly
+  # (SHA-256 is 32 bytes × 2 nybbles); shorter/longer strings are rejected
+  # at template time. PR #9682 v1.2.0 follow-up: digest input previously
+  # went on `image.tag`, which rendered the invalid reference
+  # `repo:sha256:...`. The dedicated `image.digest` field renders the
+  # correct `repo@sha256:...` form.
+  digest: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -603,7 +622,7 @@ Mapping each CodeRabbit-flagged issue to the chart construct that resolves it:
 | CodeRabbit comment (raw YAML) | Chart construct | Resolution |
 |------------------------------|-----------------|------------|
 | `daemonset.yaml:35` namespace hardcoded to `default` | `metadata: { namespace: {{ .Release.Namespace }} }` in `templates/daemonset.yaml` and `templates/dev-pod.yaml` | Namespace flows from `--namespace` flag at install time; no chart edit needed to deploy in a different namespace |
-| `daemonset.yaml:58` `:latest` mutable image tag | `tag: ""` in `values.yaml` (no default) + `{{- if not .Values.image.tag }}{{- fail "image.tag is required (pin to a release tag or digest)" }}{{- end }}` in `_helpers.tpl` (rendered as the `power-agent.validateImageTag` helper) | Chart refuses to install without an explicit tag; caller pins via `--set image.tag=v1.1.0` (current `appVersion`) or `--set image.tag=sha256:abc...` |
+| `daemonset.yaml:58` `:latest` mutable image tag | `tag: ""` + `digest: ""` in `values.yaml` (no default on either) + `power-agent.validateImageTag` helper in `_helpers.tpl` (rejects unset / `latest` / digest-on-tag / non-`sha256:<64hex>` digest / whitespace) + `power-agent.imageRef` helper that renders the canonical `{repo}:{tag}` or `{repo}@{digest}` reference. PR #9682 follow-ups (chart v1.2.0): `image.digest` was added as a separate field because the original `--set image.tag=sha256:...` form rendered the invalid reference `repo:sha256:...` (the canonical OCI digest form is `repo@sha256:...`); validator was tightened to enforce 64 hex chars exactly (SHA-256 is 32 bytes × 2 nybbles) and to reject leading/trailing whitespace. | Chart refuses to install without an explicit pin; caller pins via `--set image.tag=v1.1.0` (current `appVersion`) **OR** `--set image.digest=sha256:<64 hex>` (mutually exclusive). |
 | `rbac.yaml:50` `${POWER_AGENT_NAMESPACE}` envsubst placeholder | `namespace: {{ .Release.Namespace }}` in `templates/rolebinding.yaml` | No envsubst step; Helm resolves natively |
 
 The chart also resolves an issue CodeRabbit *didn't* file but is worth
@@ -619,10 +638,38 @@ rather than runtime (three in v1.0.0; `validateActuator` and
 `validateEnforce` added in v1.1.0 alongside the DCGM actuator):
 
 ```gotemplate
+{{/*
+  validateImageTag (v1.2.0) — enforces exactly one of image.tag /
+  image.digest, rejects `:latest`, rejects whitespace, rejects digest
+  values on the tag field, and validates the digest is exactly
+  sha256:<64 hex>. Iterative tightening per the PR9682 review and
+  two follow-ups; see _helpers.tpl for the full implementation with
+  per-rule rationale comments.
+*/}}
 {{- define "power-agent.validateImageTag" -}}
-{{- if not .Values.image.tag -}}
-{{- fail "image.tag is required (pin to a release tag or sha256:digest; :latest is not supported)" -}}
+{{- $tag := .Values.image.tag | toString -}}
+{{- $digest := .Values.image.digest | toString -}}
+{{- if and (not $tag) (not $digest) -}}{{- fail "image.tag or image.digest is required" -}}{{- end -}}
+{{- if and $tag $digest -}}{{- fail "image.tag and image.digest are mutually exclusive" -}}{{- end -}}
+{{- if $tag -}}
+  {{- if ne $tag (trim $tag) -}}{{- fail "image.tag has whitespace" -}}{{- end -}}
+  {{- if eq (lower $tag) "latest" -}}{{- fail ":latest rejected" -}}{{- end -}}
+  {{- if hasPrefix "sha256:" (lower $tag) -}}{{- fail "digests go on image.digest, not image.tag" -}}{{- end -}}
 {{- end -}}
+{{- if $digest -}}
+  {{- if ne $digest (trim $digest) -}}{{- fail "image.digest has whitespace" -}}{{- end -}}
+  {{- if not (regexMatch "^sha256:[0-9a-fA-F]{64}$" $digest) -}}{{- fail "image.digest must be sha256:<64 hex>" -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+  imageRef (v1.2.0) — renders {repo}@{digest} (canonical OCI digest
+  form) when image.digest is set, else {repo}:{tag}. Used by
+  daemonset.yaml so the rendered image reference is always valid.
+*/}}
+{{- define "power-agent.imageRef" -}}
+{{- if .digest -}}{{- printf "%s@%s" .repository .digest -}}
+{{- else -}}{{- printf "%s:%s" .repository .tag -}}{{- end -}}
 {{- end -}}
 
 {{- define "power-agent.validateMutex" -}}
@@ -987,7 +1034,7 @@ Before the commit gets pushed to `pr1a/power-agent` (or to
 4. **`helm template`** with `--set image.tag=v1.1.0 --set daemonset.enabled=true --set dev.enabled=true` — must fail fast at template time with the `validateMutex` message.
 5. **`helm template`** with `--set image.tag=v1.1.0 --set agent.actuator=invalid` — must fail fast at template time with the `validateActuator` message (v1.1.0+).
 6. **`helm template`** with `--set image.tag=v1.1.0 --set agent.actuator=dcgm --set agent.dcgm.enforce=treu` — must fail fast with the `validateEnforce` message (v1.1.0+; mirrors `_parse_bool_strict`).
-7. **`helm unittest deploy/helm/charts/power-agent`** — required as of v1.1.0. The `tests/validate_actuator_test.yaml` and `tests/validate_enforce_test.yaml` files in the chart exercise every positive/negative case for the two new template-time validators (see §4.4 closing paragraph). Snapshot of expected output: `24 passed, 0 failed` for the v1.1.0 chart.
+7. **`helm unittest deploy/helm/charts/power-agent`** — required as of v1.1.0. The `tests/validate_actuator_test.yaml`, `tests/validate_enforce_test.yaml`, and (v1.2.0+) `tests/validate_image_tag_test.yaml` files in the chart exercise every positive/negative case for the template-time validators (see §4.4 closing paragraph). Snapshot of expected output: `24 passed, 0 failed` for the v1.1.0 chart, **`46 passed, 0 failed` for the v1.2.0 chart** (added 22 cases across the new image.tag/digest validator: tag/digest mutex, latest rejection, whitespace rejection, sha256-on-tag rejection, exactly-64-hex digest enforcement, repo@digest canonical-form rendering).
 8. **Pre-commit hooks pass on the chart files** — the same 8 hooks the v3.3 §7 checklist enforces (isort/black/flake8/codespell/end-of-file-fixer/trailing-whitespace/check-yaml/ruff). `check-yaml` is the relevant one for chart files; the rest don't touch YAML.
 9. **No CI regression** — planner-group jobs trigger and pass (the chart sits inside the planner-group path filter; same job set that already covers `deploy/power_agent/**`).
 
