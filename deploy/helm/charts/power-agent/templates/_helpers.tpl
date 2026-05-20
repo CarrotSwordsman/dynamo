@@ -67,7 +67,7 @@ Create the name of the service account to use
 Validate that image.tag is set. The :latest fallback was rejected on PR #9682
 review (CodeRabbit comment on daemonset.yaml:58). Pin a release tag or
 sha256:digest at install time:
-    --set image.tag=v1.0.0
+    --set image.tag=v1.1.0
     --set image.tag=sha256:abc...
 */}}
 {{- define "power-agent.validateImageTag" -}}
@@ -87,6 +87,50 @@ not both enabled, and that dev mode has a pinned nodeName. Surfaces at
 {{- end -}}
 {{- if and .Values.dev.enabled (not .Values.dev.nodeName) -}}
 {{- fail "dev.enabled requires dev.nodeName (the GPU node to pin the dev pod to)." -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Validate the actuator selection. Catches typos at `helm install` /
+`helm template` time so the operator doesn't discover their mistake
+when the pod CrashLoopBackOffs with argparse's terse "invalid choice"
+error.
+
+The Power Agent's --actuator CLI flag has the same choices=["nvml",
+"dcgm"] guard, but surfacing the error at template time gives a
+clearer message and keeps a misconfigured install from ever creating
+Pod objects (no leftover ImagePullBackOff, no leftover RBAC).
+*/}}
+{{- define "power-agent.validateActuator" -}}
+{{- $a := .Values.agent.actuator | default "" -}}
+{{- if not (or (eq $a "nvml") (eq $a "dcgm")) -}}
+{{- fail (printf "agent.actuator must be 'nvml' or 'dcgm'; got %q" $a) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Validate agent.dcgm.enforce. Catches boolean typos (e.g.
+--set agent.dcgm.enforce=treu) at `helm install` / `helm template`
+time, so an operator doesn't lose an image-pull + container-start
+round-trip discovering it via argparse's exit-with-error path.
+
+The allowlist mirrors `power_agent._parse_bool_strict` so the chart
+and the CLI agree on what's accepted. Comparison is case-insensitive
+because Helm preserves user casing when stringifying YAML values
+(`enforce: True` → "True", `--set …=TRUE` → "TRUE"); both are
+expected to work.
+
+Only validates when actuator=dcgm — the flag is only rendered onto
+the pod command line in that case, so a stray value when
+actuator=nvml is harmless (won't reach argparse).
+*/}}
+{{- define "power-agent.validateEnforce" -}}
+{{- if eq (.Values.agent.actuator | default "") "dcgm" -}}
+{{- $e := .Values.agent.dcgm.enforce | toString | lower | trim -}}
+{{- $allowed := list "true" "1" "yes" "on" "false" "0" "no" "off" -}}
+{{- if not (has $e $allowed) -}}
+{{- fail (printf "agent.dcgm.enforce must be one of %v (case-insensitive); got %q. The Power Agent's --dcgm-enforce CLI flag uses the same allowlist (power_agent._parse_bool_strict)." $allowed .Values.agent.dcgm.enforce) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

@@ -1,5 +1,7 @@
 {{- include "power-agent.validateImageTag" . -}}
 {{- include "power-agent.validateMutex" . -}}
+{{- include "power-agent.validateActuator" . -}}
+{{- include "power-agent.validateEnforce" . -}}
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -69,6 +71,12 @@ spec:
             - --safe-default-watts=$(SAFE_DEFAULT_WATTS)
             - --node-name=$(NODE_NAME)
             - --prometheus-port={{ .Values.agent.prometheusPort }}
+            - --actuator={{ .Values.agent.actuator }}
+            {{- if eq .Values.agent.actuator "dcgm" }}
+            - --dcgm-host={{ .Values.agent.dcgm.host }}
+            - --dcgm-port={{ .Values.agent.dcgm.port }}
+            - --dcgm-enforce={{ .Values.agent.dcgm.enforce }}
+            {{- end }}
           env:
             - name: NODE_NAME
               valueFrom:

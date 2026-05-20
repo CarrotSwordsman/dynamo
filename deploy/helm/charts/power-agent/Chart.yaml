@@ -3,22 +3,36 @@
 apiVersion: v2
 name: power-agent
 description: |
-  Per-node NVML power-cap enforcement DaemonSet for Dynamo. Watches worker
+  Per-node GPU power-cap enforcement DaemonSet for Dynamo. Watches worker
   pods for the dynamo.nvidia.com/gpu-power-limit annotation, parses
-  /proc/{pid}/cgroup to recover pod UIDs, and calls
-  nvmlDeviceSetPowerManagementLimit per physical GPU.
+  /proc/{pid}/cgroup to recover pod UIDs, and applies per-GPU power caps
+  via one of two mutually-exclusive actuators selected at chart-install
+  time:
+    - NVML actuator (default): nvmlDeviceSetPowerManagementLimit. Used on
+      clusters where the GPU Operator runs with dcgm.enabled=false.
+    - DCGM actuator (opt-in via agent.actuator=dcgm): dcgmConfigSet via
+      the operator-managed nvidia-dcgm hostengine. Used on clusters where
+      the operator set dcgm.enabled=true.
+  Hardware action is byte-equivalent across actuators; selection affects
+  the write path (single-writer routing, audit logging) and, with
+  agent.dcgm.enforce=true, registers the cap as DCGM's "target
+  configuration" so it is auto-reapplied after GPU reset/reinit.
 
   Supersedes the raw deploy/power_agent/{daemonset,rbac,dev-pod}.yaml
-  manifests; see docs/design-docs/power-agent-helm-chart-plan.md for the
-  design rationale.
+  manifests; see docs/design-docs/power-agent-dual-actuator.md for the
+  dual-actuator design.
 type: application
-version: 1.0.0
-appVersion: "1.0.0"
+# 1.1.0: adds DCGM actuator (agent.actuator + agent.dcgm.*) on top of the
+# 1.0.0 NVML-only chart. Minor bump per SemVer — new opt-in functionality,
+# default behaviour byte-identical to 1.0.0.
+version: 1.1.0
+appVersion: "1.1.0"
 keywords:
   - nvidia
   - dynamo
   - power
   - nvml
+  - dcgm
   - gpu
 home: https://github.com/ai-dynamo/dynamo
 sources:
