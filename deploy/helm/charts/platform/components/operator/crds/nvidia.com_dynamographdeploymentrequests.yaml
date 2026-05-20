@@ -684,7 +684,7 @@ spec:
                   type: object
                 image:
                   description: |-
-                    Image is the container image for the DGDR profiling job.
+                    Image is the container image reference for the profiling job (planner image).
                     Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1".
                   type: string
                 model:
