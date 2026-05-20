@@ -64,15 +64,102 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
-Validate that image.tag is set. The :latest fallback was rejected on PR #9682
-review (CodeRabbit comment on daemonset.yaml:58). Pin a release tag or
-sha256:digest at install time:
-    --set image.tag=v1.1.0
-    --set image.tag=sha256:abc...
+Validate the production image reference. Exactly one of `image.tag` or
+`image.digest` must be set. Rules per PR #9682 review (initial + two
+follow-ups):
+
+  * Both empty       → fail. Chart removed the `:latest` fallback
+                       deliberately; the operator must pin.
+  * Both set         → fail. Ambiguous which one wins; refuse
+                       rather than silently preferring one.
+  * Either value has leading/trailing whitespace → fail. OCI tags
+                       and digests do not permit whitespace, and
+                       silently trimming would mask an operator's
+                       `--set-string 'image.tag= v1.1.0 '` typo
+                       until the kubelet's pull fails. PR #9682
+                       follow-up: `--set-string image.tag=" v1.1.0 "`
+                       was previously rendering `repo: v1.1.0 ` (the
+                       latest-comparison branch trimmed but the
+                       render path used the raw value).
+  * `tag == "latest"`→ fail. Case-insensitive (so
+                       `--set image.tag=LATEST` fails too). The
+                       comparison is against the literal canonical
+                       form, NOT a substring — release tags that
+                       happen to contain "latest" (e.g.
+                       `v1.0.0-latest-rc`) are still accepted.
+  * `tag` starts with `sha256:` → fail. Catches the original PR9682
+                       bug of putting a digest on the tag field
+                       (would render the invalid reference
+                       `repo:sha256:...`).
+  * `digest` not exactly `sha256:<64 hex>` → fail. SHA-256 is
+                       always 64 hex chars (32 bytes × 2 nybbles).
+                       Anything shorter or longer is a typo /
+                       truncation and must be rejected — pre-fix
+                       this allowed `{32,}` which accepted
+                       half-digests like
+                       `sha256:abc123def4567890abc123def4567890`
+                       (32 chars). Per PR9682 follow-up.
+
+A passing chart install is guaranteed to render either
+`{repo}:{tag}` (no `latest`, no whitespace) or
+`{repo}@sha256:<64 hex>` — both are valid OCI image references.
 */}}
 {{- define "power-agent.validateImageTag" -}}
-{{- if not .Values.image.tag -}}
-{{- fail "image.tag is required (pin to a release tag or sha256:digest; :latest is not supported)" -}}
+{{- $tag := .Values.image.tag | toString -}}
+{{- $digest := .Values.image.digest | toString -}}
+{{- if and (not $tag) (not $digest) -}}
+{{- fail "image.tag or image.digest is required (pin to a release tag like v1.1.0 or a digest like sha256:abc...; :latest is not supported)" -}}
+{{- end -}}
+{{- if and $tag $digest -}}
+{{- fail (printf "image.tag and image.digest are mutually exclusive (got tag=%q digest=%q). Pick one — digest gives strict content-addressed reproducibility, tag is human-readable." $tag $digest) -}}
+{{- end -}}
+{{- if $tag -}}
+{{- if ne $tag (trim $tag) -}}
+{{- fail (printf "image.tag=%q has leading/trailing whitespace; OCI tags do not permit whitespace and rendering it verbatim would produce an invalid image reference (e.g. `repo: v1.1.0 `). Fix the --set / values.yaml input. Hint: --set-string preserves whitespace exactly as quoted." $tag) -}}
+{{- end -}}
+{{- $tagLower := $tag | lower -}}
+{{- if eq $tagLower "latest" -}}
+{{- fail (printf "image.tag=%q is not supported. Pin a release tag (e.g. v1.1.0) or set image.digest=sha256:<hex>. The :latest tag was deliberately rejected on PR #9682 review to keep deployments reproducible." $tag) -}}
+{{- end -}}
+{{- if hasPrefix "sha256:" $tagLower -}}
+{{- fail (printf "image.tag=%q looks like a digest (starts with sha256:) — digests must go on image.digest, NOT image.tag. Rendering %q:%q would produce an invalid OCI image reference (`repo:sha256:...` parses as repo + tag \"sha256\" with a stray suffix). Use `--set image.tag=\"\" --set image.digest=%s` instead. PR #9682 added image.digest as a separate field for exactly this reason." $tag .Values.image.repository $tag $tag) -}}
+{{- end -}}
+{{- end -}}
+{{- if $digest -}}
+{{- if ne $digest (trim $digest) -}}
+{{- fail (printf "image.digest=%q has leading/trailing whitespace; OCI digests do not permit whitespace. Fix the --set / values.yaml input." $digest) -}}
+{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-fA-F]{64}$" $digest) -}}
+{{- fail (printf "image.digest=%q is not a valid SHA-256 digest. Must match sha256:<64 hex chars> exactly (SHA-256 is 32 bytes = 64 nybbles). Anything shorter is a truncated digest; anything longer is a typo. Example: image.digest=sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855. PR #9682 follow-up tightened this from {32,} to {64}." $digest) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Render the canonical image reference for a given repository / tag /
+digest set. Used by daemonset.yaml + dev-pod.yaml so the two stay in
+lockstep on digest handling.
+
+  * `image.digest` set → `{repository}@{digest}` (OCI digest form)
+  * else                → `{repository}:{tag}` (OCI tag form)
+
+Assumes `validateImageTag` has already run on the same value tree
+(both daemonset.yaml and dev-pod.yaml include it at the top of the
+file), so we don't re-validate here.
+
+Usage: `image: {{ include "power-agent.imageRef" (dict "repository"
+.Values.image.repository "tag" .Values.image.tag "digest"
+.Values.image.digest) | quote }}`
+
+Validator guarantees both tag and digest are whitespace-free at
+this point, so we render them verbatim — silent trimming here
+would mask validator regressions.
+*/}}
+{{- define "power-agent.imageRef" -}}
+{{- if .digest -}}
+{{- printf "%s@%s" .repository .digest -}}
+{{- else -}}
+{{- printf "%s:%s" .repository .tag -}}
 {{- end -}}
 {{- end -}}
 

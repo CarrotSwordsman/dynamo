@@ -107,17 +107,33 @@ config does not apply.
 
 ## Production install
 
-The chart requires an explicit image tag — `:latest` is rejected at
-template time. Pin a release tag (matching the chart's `appVersion`)
-or a `sha256:digest`:
+The chart requires an explicit image pin — `:latest` is rejected at
+template time. Pin **either** a release tag (matching the chart's
+`appVersion`) **or** a `sha256` digest (mutually exclusive):
 
 ```bash
+# Tag form — human-readable, matches the release.
 helm install power-agent ./deploy/helm/charts/power-agent \
   --namespace dynamo-system \
   --create-namespace \
   --set image.tag=v1.1.0 \
   --set agent.safeDefaultWatts=500
+
+# Digest form — strict content-addressed reproducibility. Renders
+# as `{repository}@sha256:...` (the canonical OCI digest form).
+helm install power-agent ./deploy/helm/charts/power-agent \
+  --namespace dynamo-system \
+  --create-namespace \
+  --set image.tag="" \
+  --set image.digest=sha256:abc123... \
+  --set agent.safeDefaultWatts=500
 ```
+
+> Digests live on `image.digest`, **not** on `image.tag`. The chart
+> renders `repo@sha256:...` when `image.digest` is set. Putting a
+> digest on `image.tag` would render the invalid reference
+> `repo:sha256:...`; PR #9682 review caught this and the validator
+> now rejects digest-shaped values on `image.tag`.
 
 Per-SKU `safeDefaultWatts` (≈70% of TDP):
 
@@ -225,7 +241,8 @@ kubectl delete pod power-agent-dev -n $NAMESPACE
 | Key | Meaning | Default |
 |-----|---------|---------|
 | `image.repository` | Power Agent image registry path | `nvcr.io/nvidia/dynamo/power-agent` |
-| `image.tag` | **Required** — pin to a release tag or `sha256:digest` (no default) | `""` |
+| `image.tag` | Release tag (e.g. `v1.1.0`). Set EITHER this OR `image.digest`. `latest` is rejected. | `""` |
+| `image.digest` | Content-addressed digest (`sha256:<hex>`). When set, the image renders as `{repository}@{digest}` (canonical OCI form). Mutually exclusive with `image.tag`. | `""` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets list | `[]` |
 | `agent.safeDefaultWatts` | Per-SKU fail-closed cap when annotation parsing fails or multi-pod conflicts can't agree (≈70% of TDP) | `500` |
@@ -297,7 +314,11 @@ TGP on GPUs it previously managed but no longer sees.
 script ConfigMap doesn't exist. Run the `kubectl create configmap`
 recipe from the Dev install section above.
 
-**`Error: image.tag is required (pin to a release tag or sha256:digest; :latest is not supported)`** at install time: pass `--set image.tag=<pinned>`. The chart deliberately rejects unset / `:latest` tags to keep deployments reproducible.
+**`Error: image.tag or image.digest is required ...`** at install time: pass `--set image.tag=<pinned>` OR `--set image.digest=sha256:<hex>` (mutually exclusive). The chart deliberately rejects unset / `:latest` tags to keep deployments reproducible.
+
+**`Error: image.digest=... is not a valid OCI digest`**: digest values must match `sha256:<hex>`. Note `repo:sha256:...` is NOT a valid image reference — digests live on `image.digest`, not `image.tag`. PR #9682 added the separate field for this reason.
+
+**`Error: image.tag and image.digest are mutually exclusive`**: pick one. Use the tag for human-readable release pinning, the digest for strict content-addressed reproducibility (e.g. in regulated environments where the image bytes must be auditable).
 
 **`Error: daemonset.enabled and dev.enabled are mutually exclusive`** at install time: pick one mode. The chart cannot render both a DaemonSet and a single-Pod dev harness from one release.
 

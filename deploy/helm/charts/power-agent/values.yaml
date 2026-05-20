@@ -7,10 +7,22 @@
 
 image:
   repository: nvcr.io/nvidia/dynamo/power-agent
-  # REQUIRED. Pin to a release tag or sha256 digest. No default to avoid the
-  # `:latest` reproducibility footgun CodeRabbit flagged on PR #9682.
-  # `helm install` will fail fast at template time if this is empty.
+  # Pin via tag OR digest — exactly one must be set. No default on
+  # `tag` to avoid the `:latest` reproducibility footgun CodeRabbit
+  # flagged on PR #9682. `helm install` fails fast at template time
+  # if both are empty (or both are set).
   tag: ""
+  # Optional. When set, the image is rendered as
+  # `{repository}@{digest}` (the canonical OCI digest form, e.g.
+  # `nvcr.io/nvidia/dynamo/power-agent@sha256:abc...`). Use this
+  # for the strictest reproducibility — a digest is content-addressed
+  # so the same string always pulls the same bytes, while a tag can
+  # be re-pointed by the registry. Must look like `sha256:<hex>`.
+  # PR #9682 fixed an earlier mistake of accepting digest values
+  # via `image.tag` — that path renders `repo:sha256:...` which is
+  # an INVALID image reference (parses as repo + tag "sha256" with
+  # a stray suffix). Digests live on their own key for this reason.
+  digest: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []

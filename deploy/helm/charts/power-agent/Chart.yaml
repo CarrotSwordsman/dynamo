@@ -25,7 +25,13 @@ type: application
 # 1.1.0: adds DCGM actuator (agent.actuator + agent.dcgm.*) on top of the
 # 1.0.0 NVML-only chart. Minor bump per SemVer — new opt-in functionality,
 # default behaviour byte-identical to 1.0.0.
-version: 1.1.0
+# 1.2.0: PR9682 follow-up hardening — adds `image.digest` field (renders
+# canonical `repo@sha256:<64hex>`), tightens validateImageTag to reject
+# digest values on the tag field, whitespace anywhere, and digests that
+# aren't exactly 64 hex chars. Default behaviour preserved when only
+# image.tag is set; image.digest is purely additive. Minor bump per SemVer
+# (new opt-in field, no breaking change to existing tag-pinned installs).
+version: 1.2.0
 appVersion: "1.1.0"
 keywords:
   - nvidia
