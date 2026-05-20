@@ -1,14 +1,27 @@
 # Power Agent — Helm Chart Packaging Plan
 
-**Status:** Draft v1 — design plan; no code authored yet (2026-05-19)
+**Status:** Implemented — chart shipped at `deploy/helm/charts/power-agent/`
+(`Chart.yaml` `version: 1.1.0`, `appVersion: "1.1.0"`). v1.0.0 of the chart
+landed in [PR #9682](https://github.com/ai-dynamo/dynamo/pull/9682) (PR 1a of
+the PR-9369 split, base of this plan); v1.1.0 added the DCGM actuator in
+[PR #9790](https://github.com/ai-dynamo/dynamo/pull/9790), whose end-to-end
+design is captured in `docs/design-docs/power-agent-dual-actuator.md`. This
+plan is the **chart-shape source of truth**; refresh v1.3 (below) aligns
+every stale §1–§8 reference with the v1.1.0 chart actually in the tree.
 **Author:** Kai Ma
-**Date:** 2026-05-19
+**Date:** 2026-05-19 (initial); refreshed 2026-05-20 (v1.3 PR9790 dual-actuator alignment, v1.4 second-pass review fixes)
 **Goal:** Replace the raw `deploy/power_agent/{daemonset,rbac,dev-pod}.yaml`
 manifests (shipped in [PR #9682](https://github.com/ai-dynamo/dynamo/pull/9682),
 PR 1a of the PR-9369 split) with a Helm chart at
 `deploy/helm/charts/power-agent/`, modelled on the existing
 `deploy/helm/charts/snapshot/` precedent. The chart structurally fixes three
 Major CodeRabbit comments on PR9682 about parameterization and reproducibility.
+v1.1.0 of the chart layers the DCGM actuator path on top (opt-in via
+`agent.actuator: dcgm`, default `nvml`), **extending** §4.2's values
+surface with `agent.actuator` + `agent.dcgm.{host,port,enforce}` and
+extending §4.4's helper set with `validateActuator` + `validateEnforce`.
+The §6 design decisions and the chart shape are unchanged; only the
+configuration knobs and the validator surface grew.
 
 ### Revision history
 
@@ -16,6 +29,8 @@ Major CodeRabbit comments on PR9682 about parameterization and reproducibility.
 |-----|------|---------|
 | v1 | 2026-05-19 | Initial plan. All five §6 decisions from the 2026-05-19 design session locked in: (§6.1) smaller scope — Power Agent only, planner-dev artifacts in PR9683/9687 untouched; (§6.2) Option α — fold chart into PR9682 directly; (§6.3) Option A — `dev-pod.yaml` ships as a gated template inside the same chart; (§6.4) delete the raw `deploy/power_agent/{daemonset,rbac,dev-pod}.yaml` in the same PR as the chart lands; (§6.5) this document. |
 | v1.1 | 2026-05-19 | Added §1.4 — End-to-end user flow. Pre-empts the "does this actually deliver a `helm something → ready to run` experience" question by making the post-plan three-command flow (2 × `helm install` + 1 × `kubectl apply` for the workload DGD) explicit, and by mapping every infrastructure primitive a power-aware planner needs to the chart that installs it. No decision change; doc-only refinement. |
+| v1.4 | 2026-05-20 | Second-pass review on the v1.3 refresh — five findings, all accepted. (1) **Status header self-contradiction (medium):** v1.3 claimed v1.1.0 added DCGM "without changing the values surface" but §4.2 explicitly extends it; reworded to "extends the values surface … and §4.4's helper set." (2) **§4.2 dev-block comment stale (major):** the inline `values.yaml` example in §4.2 still showed the v1.0.0 single-file `kubectl create configmap` recipe, contradicting both `values.yaml` on disk and §5.3.1. Updated to the actual two-file recipe (`power_agent.py` + `actuator.py`) and added the DCGM dev-image override note. `dev.namespaceRestrictedOverride: false` is now inline in the §4.2 block too, so the standalone `namespaceRestrictedOverride` snippet at the tail of §4.4 is collapsed to a one-sentence pointer rather than a redundant code block. (3) **§4.4 helm-unittest coverage overstated (medium):** v1.3 said `validate_actuator_test.yaml` covers "accidental list" and `validate_enforce_test.yaml` covers `False!` / `disabled` — neither matches the actual test files. Rewrote the coverage prose to match the real cases verified by reading the YAML: 10 actuator tests (happy: default / explicit-nvml / dcgm-default / dcgm-overrides / nvml-omits-dcgm-flags; sad: `NVML` / `DCGM` / `auto` / `typo` / empty), 14 enforce tests (9 happy spellings incl. `"TRUE"`; sad: `treu` / `enabled` / `2` / empty; 1 cross-validator nvml-skip-on-typo). Total 24, matching the §5.4 `helm unittest` expected output. (4) **§5.4 positive `helm template` overlays unrunnable (major):** the four positive overlays in v1.3 didn't include `--set image.tag=v1.1.0`, so each would fail fast on `validateImageTag` before exercising the overlay under test. Rewrote all four as explicit `helm template` commands carrying the tag; the negative "missing tag" case is now gate 3 only (and explicitly the only gate that omits the tag). Gates 4–6 also gain the tag so each isolates the validator under test. (5) **v1.3 changelog still named an internal-dev-environment-setup doc not tracked upstream (low):** v1.3 already removed every live reference but kept the filename in its own changelog summary; v1.4 rewrites the changelog text to describe it as "an internal dev-environment-setup doc not tracked upstream" without naming the file, closing the reviewer's "zero internal-dev-artifact references upstream" ask. No design changes in v1.4 — all five findings were doc-fidelity / runnability fixes on the v1.3 refresh. |
+| v1.3 | 2026-05-20 | **PR9790 dual-actuator refresh — this doc was written for the NVML-only v1.0.0 chart and went stale once PR9790 landed `agent.actuator` + `agent.dcgm.*` on top.** Seven targeted fixes, no design reversal: (1) **§1.4.2 / §5.3.1 / §7.4** — install-example `image.tag` bumped `v1.0.0 → v1.1.0` across all four locations (the v1.0.0 image lacks `actuator.py` and rejects the new `--actuator` / `--dcgm-*` flags). The §1.4.2 "Platform Status" sentence (and four other references) pointing at an internal dev-environment-setup doc not tracked upstream were generalised to "in environments where the platform chart is already installed cluster-wide." (2) **§4.1** — chart layout updated: `Chart.yaml` comment shows `version: 1.1.0, appVersion: "1.1.0"`, and the `tests/` directory (added in PR9790 for the v1.1.0 helm-unittest suite) is now part of the layout. File count: 7 templates + 2 unittests + 4 root files = 13. (3) **§4.2** — values surface extended with the actual v1.1.0 keys: `agent.actuator` (`nvml`/`dcgm`, default `nvml`), `agent.dcgm.host` (default `nvidia-dcgm.gpu-operator.svc.cluster.local`), `agent.dcgm.port` (5555), `agent.dcgm.enforce` (default `false`; matches the v1.3 doc-default of `power-agent-dual-actuator.md`). Verified against `power_agent.py:706-804` — every new key has a matching `parser.add_argument`. (4) **§4.4** — added `power-agent.validateActuator` and `power-agent.validateEnforce` template-time helpers (mirror `_parse_bool_strict` in the CLI so `--set agent.dcgm.enforce=treu` is rejected at `helm install` time, not at `kubectl describe pod` time). (5) **§5.2 / §8** — file accounting refreshed (8 templates + `tests/validate_actuator_test.yaml` + `tests/validate_enforce_test.yaml` + 3 root files = 13; ~6,650 insertions across PR9682 + PR9790). (6) **§5.3.1 / dev mode** — the dev-mode ConfigMap recipe MUST now include `actuator.py` alongside `power_agent.py`; the v1.0.0 single-file recipe will `ModuleNotFoundError: No module named 'actuator'` because `power_agent.py:26` does `from actuator import ...` at module load. (7) **§5.4 / §6 risk #5 / §7.1** — `helm-unittest` is no longer "optional/future"; v1.1.0 ships `tests/validate_{actuator,enforce}_test.yaml`, so `helm unittest deploy/helm/charts/power-agent` is now a required validation gate, risk row 5 collapses to "mitigated in v1.1," and §7.1 is reframed from "deferred follow-up" to "implemented in v1.1.0." (8) **§8 post-push** — `kubectl rollout status daemonset/power-agent-agent` was wrong: with release name `power-agent` and chart name `power-agent`, the `fullname` helper renders just `power-agent` (the `if contains $name .Release.Name` branch). Corrected to `daemonset/power-agent`. Net: every actionable reviewer finding on this doc — three blocking, four major, two medium, one low — is now closed; the plan reads as the v1.1.0 chart's source of truth, not the pre-PR9790 v1.0.0 plan it was originally. |
 | v1.2 | 2026-05-19 | Incorporated review-cycle feedback (evidence-based accept/reject pass): (1) **§4.2** — removed dead `agent.reconcileIntervalSeconds` knob (verified `power_agent.py:529-552` exposes only 4 CLI flags; `RECONCILE_INTERVAL_S = 15` is a hardcoded module constant with no flag); added a maintenance-window rationale comment to `daemonset.updateStrategy.rollingUpdate.maxUnavailable: 1` explaining why the conservative safety default is kept and when to override for large fleets. (2) **§4.4** — added a third template helper `power-agent.effectiveNamespaceRestricted` that forces namespace-scoped RBAC when `dev.enabled=true` (justified by `power_agent.py:541-546` already accepting `--namespace`; dev mode pins to one node + one namespace, so cluster-wide RBAC is gratuitous). (3) **§5.3** — strengthened chart-README requirements: dev-mode `kubectl create configmap` recipe is now ordered as a *prerequisite* step (before `helm install`), not just a post-install NOTES.txt hint; added a one-line note that the chart uses the canonical NVIDIA monitoring-agent pattern (privileged + `NVIDIA_VISIBLE_DEVICES=all`, no `nvidia.com/gpu` claim — privileged container bypasses the unprivileged-visibility edge case). (4) **§6** risk register — updated row 7 (ConfigMap prerequisite escalation); added row 9 covering the dead-knob audit principle (every `values.yaml` key must have a verified template-side or CLI-side wiring). Three of four reviewer points fully accepted; one (Consideration 1 default change) partial-accepted as "preserve `maxUnavailable: 1` default, document the override for large fleets" because power-cap enforcement is safety-critical and the parameterization the reviewer asked for is already in the proposed values surface. |
 
 ---
@@ -115,8 +130,11 @@ helm install dynamo-platform ./deploy/helm/charts/platform \
 # 2. Install the Power Agent (NEW chart from this plan).
 helm install power-agent ./deploy/helm/charts/power-agent \
   --namespace dynamo-system \
-  --set image.tag=v1.0.0 \
+  --set image.tag=v1.1.0 \
   --set agent.safeDefaultWatts=500   # per-SKU; H200=500, H100=490, A100=280
+  # Add `--set agent.actuator=dcgm` (and optionally agent.dcgm.{host,port,enforce})
+  # on clusters where the GPU Operator runs with dcgm.enabled=true; otherwise
+  # leave it at the chart default (nvml). See power-agent-dual-actuator.md.
 
 # 3. Deploy the power-aware DGD workload (a copy of disagg-power-aware.yaml
 #    with your own model, total_gpu_power_limit, and image tags).
@@ -129,9 +147,10 @@ DGD can be reconciled is created by these two `helm install` commands.
 Step 3 is the user's *workload*, which is true of every Dynamo
 deployment regardless of power-awareness.
 
-In environments where the platform is already installed cluster-wide
-(per `dpp-dev-env.md`'s "Platform Status" section), the user-facing
-experience collapses further to **a single `helm install
+In environments where the Dynamo platform chart is already installed
+cluster-wide (a common ops setup — the platform chart, NATS/etcd, Prometheus
+stack, and operator/planner RBAC are usually installed once and shared),
+the user-facing experience collapses further to **a single `helm install
 power-agent ...` command** plus the workload DGD apply.
 
 #### 1.4.3 Why the workload DGD stays `kubectl apply`-ed
@@ -165,7 +184,7 @@ To pre-empt scope questions:
 | `deploy/planner/dev/{qwen3,llama}-quickstart-dgd.yaml` (dev quickstart DGDs) | PR9687, raw YAML | Stays raw — DGD-by-convention; see §1.4.3 |
 | `examples/deployments/powerplanner/disagg-*.yaml` (example power-aware DGDs) | PR9687, raw YAML | Stays raw — DGD-by-convention; see §1.4.3 |
 | `deploy/planner-pod-rbac-dev.yaml` (DEPRECATED operator-chart ≤1.2.0 workaround) | PR9683, marked DEPRECATED in-file | Auto-retires when target clusters upgrade past chart 1.2.0; no chart needed |
-| `dpp-dev-env.md` §3's manual `kubectl create sa planner-dev-sa` + `kubectl create rolebinding` recipe (for the dev console) | PR9687 documentation | Captured by §7.2 follow-up (would collapse to `helm install planner-dev …`) |
+| The planner-dev recipe (manual `kubectl create sa planner-dev-sa` + `kubectl create rolebinding` for the dev console) | PR9687 documentation (an internal-dev-environment-setup doc not tracked upstream) | Captured by §7.2 follow-up (would collapse to `helm install planner-dev …`) |
 | OpenShift SCC annotations for the Power Agent DaemonSet | not yet implemented | §7.5 follow-up |
 
 ---
@@ -207,8 +226,9 @@ respective PRs (9683 and 9687).
    `pr9369-split-plan.md` explicitly minimises mid-flight cross-PR
    churn. Helm-ifying PR9687's planner-dev YAML in this PR would force
    synchronised edits to PR9683 (delete `planner-pod-rbac-dev.yaml`)
-   and PR9687 (delete `deploy/planner/dev/*.yaml` + adjust
-   `dpp-dev-env.md`), violating the single-cascade rebase rule.
+   and PR9687 (delete `deploy/planner/dev/*.yaml` + adjust the
+   accompanying dev-environment doc), violating the single-cascade
+   rebase rule.
 
 2. **Architectural cleanliness.** The Power Agent is a production
    runtime DaemonSet; `planner-dev-pod.yaml` is a personal developer
@@ -357,23 +377,32 @@ against the decisions recorded here.
 
 ```
 deploy/helm/charts/power-agent/
-├── Chart.yaml                       # name: power-agent, version: 1.0.0, appVersion: "1.0.0"
+├── Chart.yaml                       # name: power-agent, version: 1.1.0, appVersion: "1.1.0"
 ├── README.md                        # install + values table + uninstall + troubleshooting
 ├── values.yaml                      # see §4.2
 ├── .helmignore                      # copied verbatim from snapshot chart
-└── templates/
-    ├── _helpers.tpl                 # power-agent.{name,fullname,labels,selectorLabels,serviceAccountName,validateMutex}
-    ├── NOTES.txt                    # post-install hints (verify DS rollout, check metrics endpoint, kubectl logs)
-    ├── serviceaccount.yaml          # gated on .Values.serviceAccount.create
-    ├── role.yaml                    # Role OR ClusterRole based on .Values.rbac.namespaceRestricted
-    ├── rolebinding.yaml             # RoleBinding OR ClusterRoleBinding (same toggle)
-    ├── daemonset.yaml               # gated on .Values.daemonset.enabled (default true)
-    └── dev-pod.yaml                 # gated on .Values.dev.enabled (default false); ConfigMap created externally
+├── templates/
+│   ├── _helpers.tpl                 # power-agent.{name,fullname,labels,selectorLabels,serviceAccountName,validateImageTag,validateMutex,validateActuator,validateEnforce,effectiveNamespaceRestricted}
+│   ├── NOTES.txt                    # post-install hints (verify DS rollout, check metrics endpoint, kubectl logs)
+│   ├── serviceaccount.yaml          # gated on .Values.serviceAccount.create
+│   ├── role.yaml                    # Role OR ClusterRole based on power-agent.effectiveNamespaceRestricted
+│   ├── rolebinding.yaml             # RoleBinding OR ClusterRoleBinding (same toggle)
+│   ├── daemonset.yaml               # gated on .Values.daemonset.enabled (default true)
+│   └── dev-pod.yaml                 # gated on .Values.dev.enabled (default false); ConfigMap created externally
+└── tests/                           # helm-unittest suite — required validation gate as of v1.1.0
+    ├── validate_actuator_test.yaml  # asserts validateActuator rejects unknown actuator strings at template time
+    └── validate_enforce_test.yaml   # asserts validateEnforce rejects non-allowlisted booleans (e.g. `treu`)
 ```
 
-8 files total. ~450 LOC (estimate based on snapshot chart's analogous
-templates, minus the bits that don't apply: no PVC, no seccomp, no
-config ConfigMap in the v1 chart — see §4.2).
+13 files total (7 templates + 2 helm-unittests + 4 root files). ~1,430 LOC
+across chart + tests for v1.1.0 (the v1.0.0 baseline was ~880 LOC; PR9790
+adds the DCGM actuator wiring on `daemonset.yaml` / `dev-pod.yaml` /
+`_helpers.tpl` plus the two helm-unittest files and the corresponding
+`values.yaml` / `README.md` expansion). No PVC, no seccomp, no config
+ConfigMap — all 8 CLI knobs the agent's `main()` exposes
+(`--safe-default-watts`, `--node-name`, `--namespace`, `--prometheus-port`,
+`--actuator`, `--dcgm-host`, `--dcgm-port`, `--dcgm-enforce`; verified
+against `power_agent.py:706-804`) pass cleanly via `command:` and `env:`.
 
 ### 4.2 Values surface (proposed)
 
@@ -409,6 +438,41 @@ agent:
   # a dead knob. If a future power_agent.py revision adds a
   # --reconcile-interval flag, add the matching key here at that time.
   prometheusPort: 9100
+
+  # Power-cap actuator (chart v1.1.0+). Mutually exclusive — exactly one
+  # path is active per chart install. See
+  # docs/design-docs/power-agent-dual-actuator.md for the full rationale.
+  #   nvml (default) — Power Agent calls nvmlDeviceSetPowerManagementLimit
+  #                    directly. Use on clusters where the GPU Operator
+  #                    runs with dcgm.enabled=false (the upstream default).
+  #                    Byte-equivalent to PR9682's NVML-only chart.
+  #   dcgm — Power Agent connects standalone-TCP to the operator-managed
+  #          nvidia-dcgm hostengine and routes cap writes through
+  #          dcgmConfigSet. Use on clusters where the operator set
+  #          dcgm.enabled=true (i.e. nvidia-dcgm pod is already running).
+  # Validated at template time by power-agent.validateActuator (§4.4).
+  actuator: nvml
+
+  # DCGM connection settings. Consulted only when actuator: dcgm.
+  dcgm:
+    # Defaults match the upstream GPU Operator's nvidia-dcgm Service:
+    #   metadata.name = "nvidia-dcgm"  metadata.namespace = "gpu-operator"
+    host: nvidia-dcgm.gpu-operator.svc.cluster.local
+    port: 5555
+    # When true, call dcgmConfigEnforce after every dcgmConfigSet so the
+    # hostengine re-applies the cap automatically after a GPU reset or
+    # reinit (DcgmConfigManager.h:113-117). This is the ONLY automatic
+    # re-enforcement DCGM provides — the cap does NOT survive Power
+    # Agent restart on either setting (SIGTERM restores default), and
+    # external `nvidia-smi -pl` clobbering is repaired only on the
+    # agent's next 15-s reconcile, same as NVML. Default false matches
+    # NVML's set-and-forget semantics; flip true on sites that see
+    # frequent GPU resets. Validated at template time by
+    # power-agent.validateEnforce (§4.4), which mirrors
+    # power_agent._parse_bool_strict's allowlist so `--set
+    # agent.dcgm.enforce=treu` fails at helm install, not at
+    # kubectl describe pod.
+    enforce: false
 
 # NVIDIA container toolkit needs both runtimeClassName: nvidia AND
 # NVIDIA_VISIBLE_DEVICES=all to inject libnvidia-ml.so AND expose every GPU
@@ -477,11 +541,18 @@ daemonset:
   affinity: {}
 
 # In-cluster dev-iteration mode. Renders a single Pod (not a DaemonSet)
-# that mounts power_agent.py from a ConfigMap. The caller is responsible
-# for creating the ConfigMap separately, e.g.:
-#   kubectl create configmap dynamo-power-agent-script \
-#     --from-file=power_agent.py=components/power_agent/power_agent.py
+# that mounts both power_agent.py AND actuator.py from a ConfigMap.
+# The caller is responsible for creating the ConfigMap separately
+# BEFORE `helm install`; both files are required because power_agent.py
+# does `from actuator import ...` at module load (chart v1.1.0+):
 #
+#   kubectl create configmap dynamo-power-agent-script \
+#     --from-file=power_agent.py=components/power_agent/power_agent.py \
+#     --from-file=actuator.py=components/power_agent/actuator.py \
+#     -n $NAMESPACE
+#
+# A single-file ConfigMap will start the pod and ImportError
+# immediately (`ModuleNotFoundError: No module named 'actuator'`).
 # Mutually exclusive with daemonset.enabled (chart fails to render if both
 # are true).
 dev:
@@ -493,6 +564,14 @@ dev:
   # The dev pod uses vllm-runtime (already cached on every GPU node by
   # the quickstart DGDs) which ships with pynvml; the agent pip-installs
   # kubernetes + prometheus-client at container start.
+  #
+  # NVML actuator only. For DCGM dev mode (agent.actuator=dcgm),
+  # override repository + tag to the production power-agent image,
+  # which vendors the required pydcgm bindings and libdcgm.so:
+  #   --set dev.image.repository=nvcr.io/nvidia/dynamo/power-agent
+  #   --set dev.image.tag=v1.1.0
+  # Script-iteration via the ConfigMap mount still works against the
+  # power-agent image (the /scripts mount overrides /app at runtime).
   image:
     repository: nvcr.io/nvidia/ai-dynamo/vllm-runtime
     tag: "1.0.1"
@@ -500,16 +579,22 @@ dev:
   resources:
     requests: { cpu: "50m", memory: "128Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
+  # Set to true ONLY if you genuinely need cluster-wide pod-listing RBAC
+  # while iterating on power_agent.py (e.g., testing cross-namespace
+  # multi-pod conflict resolution). Default: false — dev mode forces
+  # namespace-scoped RBAC for principle of least privilege.
+  namespaceRestrictedOverride: false
 ```
 
-**Why no ConfigMap for chart-rendered config in v1.** The agent's CLI
-surface (verified against `power_agent.py:529-552`) is exactly 4 flags:
-`--safe-default-watts`, `--node-name`, `--namespace`, `--prometheus-port`.
-All four pass cleanly as command-line flags or container env; adding a
-ConfigMap layer is premature. If the settings surface grows later (e.g.,
-a per-SKU caps table, or a future `--reconcile-interval` flag), we can
-introduce the ConfigMap then. Same pattern as the snapshot chart, which
-only introduced its ConfigMap when CRIU's option surface justified it.
+**Why no ConfigMap for chart-rendered config in v1.x.** The agent's CLI
+surface — 4 flags in v1.0.0, 8 flags in v1.1.0 after PR9790 added
+`--actuator` / `--dcgm-host` / `--dcgm-port` / `--dcgm-enforce` (verified
+against `power_agent.py:706-804`) — all pass cleanly as command-line
+flags or container env; adding a ConfigMap layer is still premature. If
+the settings surface grows substantially later (e.g., a per-SKU caps
+table, or a future `--reconcile-interval` flag), we can introduce the
+ConfigMap then. Same pattern as the snapshot chart, which only
+introduced its ConfigMap when CRIU's option surface justified it.
 
 ### 4.3 Structural fixes the chart delivers
 
@@ -518,7 +603,7 @@ Mapping each CodeRabbit-flagged issue to the chart construct that resolves it:
 | CodeRabbit comment (raw YAML) | Chart construct | Resolution |
 |------------------------------|-----------------|------------|
 | `daemonset.yaml:35` namespace hardcoded to `default` | `metadata: { namespace: {{ .Release.Namespace }} }` in `templates/daemonset.yaml` and `templates/dev-pod.yaml` | Namespace flows from `--namespace` flag at install time; no chart edit needed to deploy in a different namespace |
-| `daemonset.yaml:58` `:latest` mutable image tag | `tag: ""` in `values.yaml` (no default) + `{{- if not .Values.image.tag }}{{- fail "image.tag is required (pin to a release tag or digest)" }}{{- end }}` in `_helpers.tpl` | Chart refuses to install without an explicit tag; caller pins via `--set image.tag=v1.0.0` or `--set image.tag=sha256:abc...` |
+| `daemonset.yaml:58` `:latest` mutable image tag | `tag: ""` in `values.yaml` (no default) + `{{- if not .Values.image.tag }}{{- fail "image.tag is required (pin to a release tag or digest)" }}{{- end }}` in `_helpers.tpl` (rendered as the `power-agent.validateImageTag` helper) | Chart refuses to install without an explicit tag; caller pins via `--set image.tag=v1.1.0` (current `appVersion`) or `--set image.tag=sha256:abc...` |
 | `rbac.yaml:50` `${POWER_AGENT_NAMESPACE}` envsubst placeholder | `namespace: {{ .Release.Namespace }}` in `templates/rolebinding.yaml` | No envsubst step; Helm resolves natively |
 
 The chart also resolves an issue CodeRabbit *didn't* file but is worth
@@ -529,8 +614,9 @@ snapshot's pattern) gives both options.
 
 ### 4.4 Template-time invariants
 
-Three `_helpers.tpl` constructs that prevent foot-guns at install time
-rather than runtime:
+Five `_helpers.tpl` constructs that prevent foot-guns at install time
+rather than runtime (three in v1.0.0; `validateActuator` and
+`validateEnforce` added in v1.1.0 alongside the DCGM actuator):
 
 ```gotemplate
 {{- define "power-agent.validateImageTag" -}}
@@ -545,6 +631,41 @@ rather than runtime:
 {{- end -}}
 {{- if and .Values.dev.enabled (not .Values.dev.nodeName) -}}
 {{- fail "dev.enabled requires dev.nodeName (the GPU node to pin the dev pod to)." -}}
+{{- end -}}
+{{- end -}}
+
+{{- /*
+  validateActuator (v1.1.0) — surfaces actuator typos at `helm install` /
+  `helm template` time instead of letting the pod CrashLoopBackOff with
+  argparse's terse "invalid choice" exit. The agent's --actuator CLI
+  flag has the same choices=["nvml","dcgm"] guard
+  (power_agent.py:730-744); the template check just gets there earlier
+  and with a clearer message.
+*/ -}}
+{{- define "power-agent.validateActuator" -}}
+{{- $a := .Values.agent.actuator | default "" -}}
+{{- if not (or (eq $a "nvml") (eq $a "dcgm")) -}}
+{{- fail (printf "agent.actuator must be 'nvml' or 'dcgm'; got %q" $a) -}}
+{{- end -}}
+{{- end -}}
+
+{{- /*
+  validateEnforce (v1.1.0) — boolean typo guard for agent.dcgm.enforce.
+  The allowlist mirrors power_agent._parse_bool_strict
+  (power_agent.py:766-784) so the chart and CLI agree on what's
+  accepted. Case-insensitive because Helm preserves user casing when
+  stringifying YAML values (`enforce: True` → "True"; `--set
+  …=TRUE` → "TRUE"). Only validates when actuator=dcgm — a stray
+  value when actuator=nvml is harmless (the chart's daemonset
+  template skips the --dcgm-enforce flag entirely in NVML mode).
+*/ -}}
+{{- define "power-agent.validateEnforce" -}}
+{{- if eq (.Values.agent.actuator | default "") "dcgm" -}}
+{{- $e := .Values.agent.dcgm.enforce | toString | lower | trim -}}
+{{- $allowed := list "true" "1" "yes" "on" "false" "0" "no" "off" -}}
+{{- if not (has $e $allowed) -}}
+{{- fail (printf "agent.dcgm.enforce must be one of %v (case-insensitive); got %q" $allowed .Values.agent.dcgm.enforce) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 
@@ -570,26 +691,49 @@ true
 {{- end -}}
 ```
 
-`validateImageTag` and `validateMutex` are called once each from
-`templates/daemonset.yaml` and `templates/dev-pod.yaml` respectively, so
-the failures surface at `helm install` / `helm template` time.
-`effectiveNamespaceRestricted` is referenced from `templates/role.yaml`
-and `templates/rolebinding.yaml` in place of
+All four `validate*` helpers are called from the top of both
+`templates/daemonset.yaml` and `templates/dev-pod.yaml` (each template
+opens with `{{- include "power-agent.validateImageTag" . -}}` /
+`validateMutex` / `validateActuator` / `validateEnforce`) so the
+failures surface at `helm install` / `helm template` time regardless of
+which mode is active. `effectiveNamespaceRestricted` is referenced from
+`templates/role.yaml` and `templates/rolebinding.yaml` in place of
 `.Values.rbac.namespaceRestricted` so the dev-mode default takes effect
 for both the Role/ClusterRole kind selection and the Binding kind.
 
-To support this helper, the values surface gains one additional opt-out
-key:
+The two helm-unittest files in `tests/` (added in v1.1.0) lock both
+new helpers' contracts. Coverage as actually shipped — every case
+below has a matching `it:` block in the test file:
 
-```yaml
-dev:
-  ...
-  # Set to true ONLY if you genuinely need cluster-wide pod-listing RBAC
-  # while iterating on power_agent.py (e.g., testing cross-namespace
-  # multi-pod conflict resolution). Default: false — dev mode forces
-  # namespace-scoped RBAC for principle of least privilege.
-  namespaceRestrictedOverride: false
-```
+- `tests/validate_actuator_test.yaml` (10 tests). Happy paths: default
+  actuator (renders `--actuator=nvml`), explicit `actuator: nvml`,
+  `actuator: dcgm` with the chart-default `dcgm.host` / `dcgm.port` /
+  `dcgm.enforce`, `actuator: dcgm` with all three DCGM knobs
+  overridden, and a `notContains` assertion that `actuator: nvml`
+  emits zero `--dcgm-*` flags. Negative paths: `actuator: NVML`
+  (uppercase typo), `actuator: DCGM` (uppercase typo), `actuator: auto`
+  (auto-detect was rejected in v1.2 of the dual-actuator design),
+  `actuator: typo` (unknown literal), and `actuator: ""` (empty
+  string).
+- `tests/validate_enforce_test.yaml` (14 tests). Happy paths: every
+  spelling in `_parse_bool_strict`'s allowlist —
+  `true` / `false` / `"1"` / `"0"` / `"yes"` / `"no"` / `"on"` /
+  `"off"` — plus `"TRUE"` to confirm the case-insensitive lowercasing
+  in the helper. Negative paths: `"treu"` (the canonical typo from
+  review comment #7), `"enabled"` (sounds-right typo), `"2"`
+  (out-of-allowlist number), and `""` (empty string). One
+  cross-validator test confirms that `enforce: "treu"` is silently
+  accepted when `actuator: nvml` because the chart never renders the
+  `--dcgm-enforce` flag on the NVML path.
+
+Total: **24 unittest cases** (10 actuator + 14 enforce). All wired
+into the §5.4 validation gates as a required
+`helm unittest deploy/helm/charts/power-agent` step.
+
+`effectiveNamespaceRestricted` is supported by the
+`dev.namespaceRestrictedOverride` opt-out key already listed in §4.2's
+dev block (default `false`; set `true` to opt back into cluster-wide
+pod-listing RBAC while iterating in dev mode).
 
 ---
 
@@ -632,24 +776,28 @@ see only the new chart commit on top.
 
 ### 5.2 Files added / removed / modified
 
-**Added (~450 LOC, 9 files):**
+**Added (chart v1.0.0 in PR9682; refreshed to chart v1.1.0 in PR9790):**
 
 ```
-docs/design-docs/power-agent-helm-chart-plan.md            ~640
-deploy/helm/charts/power-agent/Chart.yaml                   ~20
-deploy/helm/charts/power-agent/README.md                   ~120
-deploy/helm/charts/power-agent/values.yaml                  ~90
-deploy/helm/charts/power-agent/.helmignore                  ~15
-deploy/helm/charts/power-agent/templates/_helpers.tpl       ~70
-deploy/helm/charts/power-agent/templates/NOTES.txt          ~20
-deploy/helm/charts/power-agent/templates/serviceaccount.yaml ~15
-deploy/helm/charts/power-agent/templates/role.yaml          ~30
-deploy/helm/charts/power-agent/templates/rolebinding.yaml   ~30
-deploy/helm/charts/power-agent/templates/daemonset.yaml    ~125
-deploy/helm/charts/power-agent/templates/dev-pod.yaml      ~110
+docs/design-docs/power-agent-helm-chart-plan.md             1000+   (this doc)
+deploy/helm/charts/power-agent/Chart.yaml                     40
+deploy/helm/charts/power-agent/README.md                     255
+deploy/helm/charts/power-agent/values.yaml                   195
+deploy/helm/charts/power-agent/.helmignore                    26
+deploy/helm/charts/power-agent/templates/_helpers.tpl        144
+deploy/helm/charts/power-agent/templates/NOTES.txt            48
+deploy/helm/charts/power-agent/templates/serviceaccount.yaml  19
+deploy/helm/charts/power-agent/templates/role.yaml            36
+deploy/helm/charts/power-agent/templates/rolebinding.yaml     37
+deploy/helm/charts/power-agent/templates/daemonset.yaml      117
+deploy/helm/charts/power-agent/templates/dev-pod.yaml        122
+deploy/helm/charts/power-agent/tests/validate_actuator_test.yaml  120   (v1.1.0)
+deploy/helm/charts/power-agent/tests/validate_enforce_test.yaml   128   (v1.1.0)
 ```
 
-**Removed (-293 LOC, 3 files):**
+Chart-only total: **1,287 LOC across 13 files** (7 templates + 2 helm-unittests + 4 root files).
+
+**Removed (-293 LOC, 3 files; PR9682 only):**
 
 ```
 deploy/power_agent/daemonset.yaml    -115
@@ -657,21 +805,28 @@ deploy/power_agent/rbac.yaml          -50
 deploy/power_agent/dev-pod.yaml      -128
 ```
 
-**Modified (~30 LOC of doc touch-up):**
+**Modified (PR9682):**
 
 ```
 components/power_agent/README.md       (replace kubectl-apply recipe with helm-install)
-examples/deployments/powerplanner/disagg-power-aware.yaml      (header comment update)
-examples/deployments/powerplanner/disagg-conservative-cold-start.yaml (header comment update)
-.github/filters.yaml                                            (add deploy/helm/charts/power-agent/** to planner-group filter)
+.github/filters.yaml                   (add deploy/helm/charts/power-agent/** to planner-group filter)
 ```
 
+`examples/deployments/powerplanner/*.yaml` lives in PR9687 and is not
+touched by PR9682 or PR9790 — those header-comment refreshes will
+happen when PR9687 rebases. The earlier draft of this section assumed
+PR9682 would carry them; the rebase cascade absorbed them instead.
 (Last item: the planner-group filter already covers `deploy/power_agent/**`
 per PR9682. Adding the chart path keeps chart-only changes triggering
 the same CI job set.)
 
-**Net delta on PR9682:** +480, -290 → ~+190 net. PR9682 total grows
-from 1,534 → ~1,720 insertions.
+**Net delta as actually landed:** PR9682 (v1.0.0) was ~+1,025 chart LOC
+net of raw-YAML deletion; PR9790 (v1.1.0) layered the DCGM actuator on
+top (+actuator.py + helm-unittests + values/_helpers/daemonset/dev-pod
+expansion + dual-actuator design doc). See `git log --stat origin/main..HEAD --
+deploy/helm/charts/power-agent/ components/power_agent/` for the
+authoritative numbers; the table above reflects current-on-disk LOC,
+not the original v1.0.0 size estimates.
 
 ### 5.3 Doc-touch ripple
 
@@ -711,17 +866,28 @@ addresses a specific point in the v1.2 review-feedback cycle:
 3. **Dev install** — split into two ordered steps:
 
    > **Step 1 (REQUIRED before `helm install`):** Create the script ConfigMap.
+   > As of chart v1.1.0 the ConfigMap MUST carry BOTH `power_agent.py`
+   > AND `actuator.py` — `power_agent.py:26` does
+   > `from actuator import Actuator, DcgmActuator, NvmlActuator` at
+   > module load, so a v1.0.0-style single-file ConfigMap will start
+   > the pod and then immediately ImportError
+   > (`ModuleNotFoundError: No module named 'actuator'`).
    >
    > ```bash
    > kubectl create configmap dynamo-power-agent-script \
    >   --from-file=power_agent.py=components/power_agent/power_agent.py \
+   >   --from-file=actuator.py=components/power_agent/actuator.py \
    >   -n $NAMESPACE
    > ```
    >
-   > Without this ConfigMap the dev pod will stay `Pending` with a
-   > `MountVolume.SetUp failed for volume "script"` event. The chart does
-   > not create the ConfigMap automatically because the developer
-   > iteration loop is `kubectl create cm --from-file=... --dry-run=client
+   > Without any ConfigMap the dev pod will stay `Pending` with a
+   > `MountVolume.SetUp failed for volume "script"` event. With a
+   > single-file ConfigMap the pod will start and ImportError
+   > immediately — the `tests/validate_actuator_test.yaml` helm-unittest
+   > pins the `actuator.py` mount as a chart contract for v1.1.0+.
+   > The chart does not create the ConfigMap automatically because the
+   > developer iteration loop is
+   > `kubectl create cm --from-file=... --from-file=... --dry-run=client
    > -o yaml | kubectl apply -f -` (faster than `helm upgrade --set-file`).
    >
    > **Step 2:** Install the chart in dev mode (pinned to one GPU node):
@@ -729,7 +895,7 @@ addresses a specific point in the v1.2 review-feedback cycle:
    > ```bash
    > helm install power-agent ./deploy/helm/charts/power-agent \
    >   --namespace $NAMESPACE \
-   >   --set image.tag=v1.0.0 \
+   >   --set image.tag=v1.1.0 \
    >   --set daemonset.enabled=false \
    >   --set dev.enabled=true \
    >   --set dev.nodeName=<gpu-node-name>
@@ -741,6 +907,20 @@ addresses a specific point in the v1.2 review-feedback cycle:
    > (addresses Consideration 2). Override with
    > `--set dev.namespaceRestrictedOverride=true` only if you genuinely
    > need cluster-wide pod visibility while iterating.
+   >
+   > For **DCGM dev mode** (`--set agent.actuator=dcgm`), additionally
+   > override `dev.image` because the default `vllm-runtime:1.0.1`
+   > ships `pynvml` only and lacks `pydcgm` + `libdcgm.so`:
+   >
+   > ```bash
+   >   --set dev.image.repository=nvcr.io/nvidia/dynamo/power-agent \
+   >   --set dev.image.tag=v1.1.0
+   > ```
+   >
+   > Script iteration via the ConfigMap mount still works against the
+   > production power-agent image (the `/scripts` mount overrides
+   > `/app` at runtime; the dev-pod command invokes
+   > `/scripts/power_agent.py` explicitly).
 
 4. **Values table** — generated/maintained list of all keys with
    defaults and short descriptions, mirroring `deploy/helm/charts/snapshot/README.md`'s
@@ -763,23 +943,60 @@ gets the recipe at install time too.
 
 ### 5.4 Validation gates the commit must pass
 
-Before the commit gets pushed to `pr1a/power-agent`:
+Before the commit gets pushed to `pr1a/power-agent` (or to
+`pr1b/power-agent-dcgm-actuator` for chart v1.1.0 changes):
 
 1. **`helm lint deploy/helm/charts/power-agent`** — zero errors.
-2. **`helm template`** with three representative value overlays:
-   - default (production DS, cluster RBAC)
-   - `--set rbac.namespaceRestricted=true`
-   - `--set daemonset.enabled=false --set dev.enabled=true --set dev.nodeName=<gpu-node>`
-   Each produces a valid set of manifests (`kubectl --dry-run=client apply -f -` passes).
-3. **`helm template`** with no image tag set — must fail fast at template time with the message from §4.4's `validateImageTag` helper.
-4. **`helm template`** with both `daemonset.enabled=true` and `dev.enabled=true` — must fail fast at template time with the `validateMutex` message.
-5. **Pre-commit hooks pass on the chart files** — the same 8 hooks the v3.3 §7 checklist enforces (isort/black/flake8/codespell/end-of-file-fixer/trailing-whitespace/check-yaml/ruff). `check-yaml` is the relevant one for chart files; the rest don't touch YAML.
-6. **No CI regression** — planner-group jobs trigger and pass (the chart sits inside the planner-group path filter; same job set that already covers `deploy/power_agent/**`).
+2. **`helm template`** with four representative value overlays
+   (the fourth was added in v1.1.0 for the DCGM actuator path). Every
+   positive command MUST include `--set image.tag=v1.1.0` — without
+   it the chart fails fast via `validateImageTag` before reaching the
+   overlay under test, which is the intended behaviour but it means
+   a "default install" command is `--set image.tag=v1.1.0` (the
+   negative case of an absent tag is exercised separately in gate 3):
 
-`helm-unittest` (used by the `deploy/helm/charts/platform/Makefile`) is
-optional for v1. Adding a `tests/` directory with a few representative
-templated-output assertions is a candidate for a v1.1 follow-up; not
-blocking the first release of the chart.
+   ```bash
+   # 2a. default (production DS, cluster RBAC, NVML actuator)
+   helm template power-agent ./deploy/helm/charts/power-agent \
+     --namespace dynamo-system --set image.tag=v1.1.0
+
+   # 2b. namespace-scoped RBAC
+   helm template power-agent ./deploy/helm/charts/power-agent \
+     --namespace dynamo-system --set image.tag=v1.1.0 \
+     --set rbac.namespaceRestricted=true
+
+   # 2c. dev mode (Pod, not DaemonSet; pinned to one GPU node)
+   helm template power-agent ./deploy/helm/charts/power-agent \
+     --namespace dynamo-system --set image.tag=v1.1.0 \
+     --set daemonset.enabled=false \
+     --set dev.enabled=true --set dev.nodeName=<gpu-node>
+
+   # 2d. DCGM actuator (re-run with --set agent.dcgm.enforce=true too)
+   helm template power-agent ./deploy/helm/charts/power-agent \
+     --namespace dynamo-system --set image.tag=v1.1.0 \
+     --set agent.actuator=dcgm
+   ```
+
+   Each produces a valid set of manifests (`kubectl --dry-run=client apply -f -` passes),
+   and the DCGM overlay must render `--dcgm-host` / `--dcgm-port` /
+   `--dcgm-enforce` onto the pod command line.
+3. **`helm template`** with no image tag set (and otherwise default
+   values) — must fail fast at template time with the message from
+   §4.4's `validateImageTag` helper. This is the only gate that
+   intentionally omits `--set image.tag=...`.
+4. **`helm template`** with `--set image.tag=v1.1.0 --set daemonset.enabled=true --set dev.enabled=true` — must fail fast at template time with the `validateMutex` message.
+5. **`helm template`** with `--set image.tag=v1.1.0 --set agent.actuator=invalid` — must fail fast at template time with the `validateActuator` message (v1.1.0+).
+6. **`helm template`** with `--set image.tag=v1.1.0 --set agent.actuator=dcgm --set agent.dcgm.enforce=treu` — must fail fast with the `validateEnforce` message (v1.1.0+; mirrors `_parse_bool_strict`).
+7. **`helm unittest deploy/helm/charts/power-agent`** — required as of v1.1.0. The `tests/validate_actuator_test.yaml` and `tests/validate_enforce_test.yaml` files in the chart exercise every positive/negative case for the two new template-time validators (see §4.4 closing paragraph). Snapshot of expected output: `24 passed, 0 failed` for the v1.1.0 chart.
+8. **Pre-commit hooks pass on the chart files** — the same 8 hooks the v3.3 §7 checklist enforces (isort/black/flake8/codespell/end-of-file-fixer/trailing-whitespace/check-yaml/ruff). `check-yaml` is the relevant one for chart files; the rest don't touch YAML.
+9. **No CI regression** — planner-group jobs trigger and pass (the chart sits inside the planner-group path filter; same job set that already covers `deploy/power_agent/**`).
+
+`helm-unittest` was deferred from chart v1.0.0 ("optional, v1.1 follow-up"
+per the original §6 risk #5 / §7.1) and landed alongside the dual-actuator
+work in PR9790. It is now a **required** validation gate for any chart
+change, not an optional polish item — the two `validate_*_test.yaml` files
+encode chart contracts the dev-mode iteration loop depends on (e.g. the
+`actuator.py` mount in `dev-pod.yaml`).
 
 ---
 
@@ -791,8 +1008,8 @@ blocking the first release of the chart.
 | 2 | OpenShift / SCC compatibility — power-agent needs the same `openshift.io/required-scc: privileged` treatment as snapshot agent | Medium | Out of scope for v1 (snapshot took it as a v1.1+ addition too). Capture as follow-up issue; for v1 the chart works on vanilla K8s with no SCC. See §7.5. |
 | 3 | Image-tag requirement breaks demo flows that previously used `:latest` | Low (no production users yet — PR9682 is open) | README documents the requirement prominently; demo recipe in `examples/deployments/powerplanner/` will reference a pinned tag |
 | 4 | Reviewers ask "why is this in PR9682 and not a separate PR?" | Medium | Pre-empted by §3.2 rationale + §1.2 CodeRabbit linkage in the PR description |
-| 5 | `helm-unittest` absence flagged in review (other charts use it) | Low (only the platform umbrella chart uses it today; snapshot does not) | Document the deferral in the chart README; add as v1.1 follow-up |
-| 6 | Chart `appVersion` drift from `power_agent.py` over time | Medium (long-term) | v1: appVersion = "1.0.0" matches chart version = 1.0.0. Document in the chart README that subsequent agent revs bump both in lock-step. If the appVersion gets out of sync in a future PR, that's a release-process bug, not a chart-design bug. |
+| 5 | `helm-unittest` absence flagged in review (other charts use it) | ✅ **Closed in v1.1.0 (PR9790)** — `tests/validate_actuator_test.yaml` + `tests/validate_enforce_test.yaml` ship with the chart; `helm unittest deploy/helm/charts/power-agent` is now a required §5.4 validation gate. | n/a — historical row kept for the audit trail. |
+| 6 | Chart `appVersion` drift from `power_agent.py` over time | Medium (long-term) | Current state: chart `version` and `appVersion` both pin to `"1.1.0"` (bumped in PR9790 alongside the DCGM actuator wiring; v1.0.0 was the PR9682 NVML-only baseline). Document in the chart README that subsequent agent revs bump both in lock-step. If the appVersion gets out of sync in a future PR, that's a release-process bug, not a chart-design bug. The chart-README install examples (and §1.4.2 / §5.3.1 here) MUST be kept current with `appVersion` because earlier images reject newer CLI flags (e.g. v1.0.0 image + v1.1.0 chart → argparse rejects `--actuator`). |
 | 7 | `dev.scriptConfigMap` is named externally; users may forget to create it | Medium (only affects dev mode) | **v1.2 update:** the ConfigMap-creation recipe is promoted from a post-install NOTES.txt hint to a **prerequisite step ordered before `helm install`** in the chart README (see §5.3.1 step 3). NOTES.txt repeats the recipe post-install for safety. Chart `helm install` itself does not error if the CM is missing — failure mode is a Pending Pod with a clear `MountVolume.SetUp failed for volume "script"` event, which is debuggable. Auto-creation via Helm pre-install hook was considered and rejected (extra RBAC + Job machinery for a dev-only feature). |
 | 8 | Cascade impact: PR9683 base auto-updates when PR9682's tip moves | Low (PR9683 is `pr1b/planner-infra` based on `pr1a/power-agent`; new commit on `pr1a` is a non-conflicting addition to a disjoint file tree) | Confirmed by inspection: PR9683's diff touches `deploy/helm/charts/platform/...`, `deploy/planner-pod-rbac-dev.yaml`, and planner Python files only. None of these collide with `deploy/helm/charts/power-agent/`. PR9683 rebases trivially. |
 | 9 | Dead-knob risk: a `values.yaml` key whose name suggests it does something but is never wired to a template or CLI flag (silently no-ops; user thinks they configured it). | Medium (one such case found in v1.1: `agent.reconcileIntervalSeconds`, which had no `power_agent.py` CLI wiring — dropped in v1.2 per the v1.2 revision note) | Apply the **dead-knob audit principle** when authoring: every key in `values.yaml` must trace to either (a) a `{{ .Values.xxx }}` reference in a `templates/*.yaml`, or (b) a CLI flag in `power_agent.py:main()` whose `args.xxx` is consumed by `PowerAgent.__init__`. Audit during the §8 authoring checklist (new sub-bullet). If a desired knob has no current wiring, drop it from `values.yaml` and open a separate Python PR to add the flag first. |
@@ -803,11 +1020,22 @@ blocking the first release of the chart.
 
 ### 7.1 `helm-unittest` tests for the power-agent chart
 
-`deploy/helm/charts/platform/Makefile` defines a `test` target wired to
-`helm-unittest`. Adding a `deploy/helm/charts/power-agent/tests/`
-directory with templated-output assertions would round out the
-chart's verification surface. Deferred to a v1.1 follow-up. (Snapshot
-chart shipped without unittest tests too.)
+**Status: ✅ implemented in v1.1.0 (PR9790).** This was originally framed
+as a v1.1 follow-up; it shipped as part of the dual-actuator work because
+`validateActuator` and `validateEnforce` were too easy to mis-render
+without locking their contracts via helm-unittest assertions.
+`deploy/helm/charts/power-agent/tests/validate_actuator_test.yaml` and
+`tests/validate_enforce_test.yaml` between them cover every positive
+spelling of the actuator/enforce values plus the typo classes
+(`actuator: ""`, `actuator: AUTO`, `enforce: treu`, `enforce: enabled`,
+etc.), and `helm unittest deploy/helm/charts/power-agent` is wired into
+§5.4 as a required validation gate. The platform-chart Makefile's
+helm-unittest convention is intentionally not adopted (no Makefile in
+this chart yet); `helm unittest` is run directly. See `power-agent-dual-
+actuator.md` v1.9 changelog entry for the assertion-format history (the
+suite was initially written with `matchRegex` against
+`spec.template.spec.containers[0].command`, which renders as a list —
+rewrote to `contains` to match helm-unittest 1.1.0's list semantics).
 
 ### 7.2 Planner-dev Helm chart (`deploy/helm/charts/planner-dev/`)
 
@@ -817,10 +1045,10 @@ Recommended as a separate follow-up PR after PR9687 merges. Scope:
 - `deploy/planner-pod-rbac-dev.yaml` rules (currently in PR9683 as a transitional file) → templated Role + RoleBinding gated on `legacyOperatorCompat: false`
 - Optional: `deploy/planner/dev/{qwen3,llama}-quickstart-dgd.yaml` → values-driven DGD ConfigMap
 
-This would also collapse `dpp-dev-env.md` §1–§3's manual
-`kubectl create sa` / `kubectl create rolebinding` recipe to one
-`helm install planner-dev …` invocation. Out of scope for this plan
-because:
+This would also collapse PR9687's accompanying dev-environment-setup
+doc's manual `kubectl create sa` / `kubectl create rolebinding` recipe
+to one `helm install planner-dev …` invocation. Out of scope for this
+plan because:
 - It requires PR9687 to be merged or close to it (the source files
   for the chart live in PR9687).
 - It does not relate to the CodeRabbit feedback that motivated the
@@ -838,14 +1066,17 @@ users want parametric DGD generation, that belongs in a separate
 
 ### 7.4 Power-agent appVersion bumping policy
 
-For v1 the chart `version` and `appVersion` both pin to `"1.0.0"` and
-match the literal string in the (currently unwritten) version manifest
-of `components/power_agent/`. When `power_agent.py` next gains a
-substantive behaviour change, both bump together. Codifying this as a
-chart-release policy (e.g., a pre-commit check that diffs
-`power_agent.py` LOC against `Chart.yaml` `appVersion`) is **out of
-scope for v1**; capture as a future operational hygiene task if it
-becomes a real risk.
+Current state: chart `version` and `appVersion` both pin to `"1.1.0"`
+(bumped together in PR9790 — minor bump per SemVer because the DCGM
+actuator is new opt-in functionality with byte-equivalent NVML default
+behaviour). The original v1.0.0 baseline landed in PR9682. When
+`power_agent.py` next gains a substantive behaviour change, both bump
+together. Codifying this as a chart-release policy (e.g., a pre-commit
+check that diffs `power_agent.py` LOC against `Chart.yaml` `appVersion`)
+is **out of scope for chart v1.x**; capture as a future operational
+hygiene task if it becomes a real risk. The v1.0.0 → v1.1.0 lock-step
+bump in PR9790 is the first data point that the lock-step convention
+holds in practice.
 
 ### 7.5 OpenShift SCC support
 
@@ -870,13 +1101,15 @@ Mirror of `pr9369-split-plan.md` §7, scoped to this work:
 
 **Authoring:**
 
-- [ ] Author all 9 chart files following §4.1's layout.
+- [ ] Author all 13 chart files following §4.1's layout (7 templates + 2 helm-unittests + 4 root files).
 - [ ] Cross-check every Helm value reference (`{{ .Values.xxx }}`) against the §4.2 values schema — no orphaned values, no missing defaults.
-- [ ] **Dead-knob audit (v1.2, risk register #9):** confirm every key in the chart's `values.yaml` traces to either a `{{ .Values.xxx }}` reference in `templates/*.yaml` or a CLI flag in `power_agent.py:main()`. If any key has no wiring, drop it from `values.yaml` rather than ship dead configuration surface. (Specifically: the v1.1 draft had `agent.reconcileIntervalSeconds` as such a dead knob — verify it does not reappear.)
+- [ ] **Dead-knob audit (v1.2, risk register #9):** confirm every key in the chart's `values.yaml` traces to either a `{{ .Values.xxx }}` reference in `templates/*.yaml` or a CLI flag in `power_agent.py:main()`. If any key has no wiring, drop it from `values.yaml` rather than ship dead configuration surface. (Specifically: the v1.1 draft had `agent.reconcileIntervalSeconds` as such a dead knob — verify it does not reappear. Specifically for v1.1.0: `agent.actuator` traces to `--actuator`, `agent.dcgm.host` to `--dcgm-host`, `agent.dcgm.port` to `--dcgm-port`, `agent.dcgm.enforce` to `--dcgm-enforce` — all verified live in `power_agent.py:730-804`.)
 - [ ] **RBAC effective-scope audit (v1.2, helper):** confirm `templates/role.yaml` and `templates/rolebinding.yaml` reference `include "power-agent.effectiveNamespaceRestricted" .` rather than `.Values.rbac.namespaceRestricted` directly. Test `helm template --set dev.enabled=true --set dev.nodeName=foo` produces `Role` + `RoleBinding` (not `ClusterRole`).
+- [ ] **Validator coverage audit (v1.3, helpers):** confirm both `templates/daemonset.yaml` and `templates/dev-pod.yaml` open with all four `{{- include "power-agent.validate*" . -}}` lines (validateImageTag, validateMutex, validateActuator, validateEnforce). The dev-pod template was missing the actuator-validator pair pre-PR9790; the §5.4 helm-unittest gate catches regressions.
 - [ ] Run `helm lint` on the chart — zero errors.
-- [ ] Run the three `helm template` exercises from §5.4 and confirm each renders to valid manifests.
-- [ ] Run the two negative-path `helm template` exercises (missing image tag, mutex violation) and confirm both fail with the §4.4 helper messages.
+- [ ] Run the four `helm template` exercises from §5.4 (default / namespace-restricted / dev-mode / DCGM actuator) and confirm each renders to valid manifests.
+- [ ] Run the four negative-path `helm template` exercises (missing image tag, mutex violation, invalid actuator, invalid enforce) and confirm all four fail with the §4.4 helper messages.
+- [ ] Run `helm unittest deploy/helm/charts/power-agent` — expect `24 passed, 0 failed` on the v1.1.0 chart.
 
 **Doc touch-up:**
 
@@ -899,9 +1132,13 @@ Mirror of `pr9369-split-plan.md` §7, scoped to this work:
   ```bash
   helm install power-agent ./deploy/helm/charts/power-agent \
     --namespace <ns> \
-    --set image.tag=<pinned-tag> \
+    --set image.tag=v1.1.0 \
     --set agent.safeDefaultWatts=500
-  kubectl rollout status daemonset/power-agent-agent -n <ns>
+  # release name 'power-agent' + chart name 'power-agent' → fullname helper
+  # collapses to just 'power-agent' (the `contains $name .Release.Name` branch
+  # in _helpers.tpl). The DaemonSet's metadata.name is therefore 'power-agent',
+  # NOT 'power-agent-agent' — earlier drafts of this checklist had it wrong.
+  kubectl rollout status daemonset/power-agent -n <ns>
   kubectl logs -l app.kubernetes.io/name=power-agent -n <ns> --tail=50
   ```
-- [ ] All 43 `components/power_agent/tests/` tests still pass (no code changes — sanity smoke only).
+- [ ] All `components/power_agent/tests/` Python tests still pass (no code changes — sanity smoke only). As of v1.1.0 this is 9 test modules including the actuator-protocol / DCGM-actuator suites added by PR9790; `python3.10 -m pytest components/power_agent/tests/ -v` is the canonical invocation.
