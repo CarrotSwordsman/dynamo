@@ -130,10 +130,9 @@ Step 3 is the user's *workload*, which is true of every Dynamo
 deployment regardless of power-awareness.
 
 In environments where the platform is already installed cluster-wide
-(per `dpp-dev-env.md`'s "Platform Status" section — true today on the
-shared Azure AKS dev cluster), the user-facing experience collapses
-further to **a single `helm install power-agent ...` command** plus
-the workload DGD apply.
+(per `dpp-dev-env.md`'s "Platform Status" section), the user-facing
+experience collapses further to **a single `helm install
+power-agent ...` command** plus the workload DGD apply.
 
 #### 1.4.3 Why the workload DGD stays `kubectl apply`-ed
 
@@ -338,8 +337,9 @@ in the same commit that adds the chart.**
 
 **Decision: this file (`docs/design-docs/power-agent-helm-chart-plan.md`)
 ships as a tracked design-doc** in PR9682 alongside the chart. Style
-follows the existing `docs/design-docs/pr9369-split-plan.md` and
-`docs/design-docs/power-agent-dcgm-actuator.md` conventions.
+follows the existing `docs/design-docs/pr9369-split-plan.md`
+convention (sibling design-doc style adopted across the
+`docs/design-docs/power-agent-*.md` series).
 
 #### Rationale
 
