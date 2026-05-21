@@ -23,7 +23,8 @@ Emits the custom Gemma 4 grammar:
 - Reasoning: `<|channel>thought\n...<channel|>`
 - Tool definitions: nested `declaration:fn{description:<|"|>...<|"|>,parameters:{...}}` blocks
 
-This template is a verbatim copy of the upstream vLLM project's
+This template is adapted from the upstream vLLM project's
 `examples/tool_chat_template_gemma4.jinja` (Apache-2.0). It is required when
 the HF chat template for Gemma 4 lacks the `<|"|>`-delimited tool-definition
-encoding that the parsers expect.
+encoding that the parsers expect, and carries Dynamo-specific compatibility
+fixes for Anthropic tool-result histories.

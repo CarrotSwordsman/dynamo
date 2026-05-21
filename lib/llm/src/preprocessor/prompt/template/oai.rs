@@ -1948,6 +1948,68 @@ NORMAL_MODE
         );
     }
 
+    #[test]
+    fn test_gemma4_template_renders_reasoning_content_segments() {
+        use super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter, OAIPromptFormatter};
+
+        let template = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/chat_templates/gemma4_tool.jinja"
+        ));
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "bos_token": "<bos>",
+            "chat_template": template
+        }))
+        .unwrap();
+
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
+        assert!(formatter.template_handles_reasoning);
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "google/gemma-4-31b-it",
+            "chat_template_args": {"enable_thinking": true},
+            "messages": [
+                {"role": "user", "content": "Run ls and report the marker filename."},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": [
+                        "I should list the directory to find the marker filename.",
+                        ""
+                    ],
+                    "tool_calls": [{
+                        "id": "toolu_01_ls",
+                        "type": "function",
+                        "function": {
+                            "name": "Bash",
+                            "arguments": "{\"command\":\"ls\"}"
+                        }
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "toolu_01_ls",
+                    "content": "CLAUDE_CODE_MARKER.txt"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+        assert!(
+            rendered.contains("<|channel>thought\nI should list the directory"),
+            "reasoning_content segments must render as thought text, got: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("CLAUDE_CODE_MARKER.txt"),
+            "tool result must still render, got: {}",
+            rendered
+        );
+    }
+
     /// Real Qwen3-4B-Thinking-2507 chat template (verbatim from
     /// `Qwen/Qwen3-4B-Thinking-2507/tokenizer_config.json`). Used to
     /// regression-test append-only rendering across multi-step tool use.

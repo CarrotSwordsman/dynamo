@@ -1,6 +1,6 @@
 {# SPDX-FileCopyrightText: Copyright contributors to the vLLM project, NVIDIA CORPORATION & AFFILIATES #}
 {# SPDX-License-Identifier: Apache-2.0 #}
-{# Verbatim copy of vllm/examples/tool_chat_template_gemma4.jinja, vendored for use with Dynamo's `gemma4` parsers. Pass via --custom-jinja-template. #}
+{# Adapted from vllm/examples/tool_chat_template_gemma4.jinja, vendored for use with Dynamo's `gemma4` parsers. Pass via --custom-jinja-template. #}
 {%- macro format_parameters(properties, required) -%}
     {%- set standard_keys = ['description', 'type', 'properties', 'required', 'nullable'] -%}
     {%- set ns = namespace(found_first=false) -%}
@@ -225,8 +225,12 @@
         {{- '<|turn>' + role + '\n' }}
     {%- endif -%}
 
-    {%- if message.get('reasoning') and loop.index0 > ns_turn.last_user_idx and message.get('tool_calls') -%}
-        {{- '<|channel>thought\n' + message['reasoning'] + '\n<channel|>'}}
+    {%- set thinking_text = message.get('reasoning') or message.get('reasoning_content') -%}
+    {%- if thinking_text is sequence and thinking_text is not string -%}
+        {%- set thinking_text = thinking_text | select | join('\n') -%}
+    {%- endif -%}
+    {%- if thinking_text and loop.index0 > ns_turn.last_user_idx and message.get('tool_calls') -%}
+        {{- '<|channel>thought\n' + thinking_text + '\n<channel|>'}}
     {%- endif -%}
 
             {%- if message['tool_calls'] -%}
