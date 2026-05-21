@@ -36,7 +36,11 @@ bitflags! {
         const Completions = 1 << 1;
         const Embedding = 1 << 2;
         const TensorBased = 1 << 3;
-        const Prefill = 1 << 4;
+        // Bit 1 << 4 was `Prefill`, removed in Phase 3 of the topology
+        // readiness DEP. The processing-stage role (prefill / decode /
+        // encode / aggregated) is now expressed via
+        // [`crate::worker_type::WorkerType`]; `ModelType` only describes
+        // the OpenAI-style endpoints the model exposes.
         const Images = 1 << 5;
         const Audios = 1 << 6;
         const Videos = 1 << 7;
@@ -59,9 +63,6 @@ impl ModelType {
     }
     pub fn supports_tensor(&self) -> bool {
         self.contains(ModelType::TensorBased)
-    }
-    pub fn supports_prefill(&self) -> bool {
-        self.contains(ModelType::Prefill)
     }
     pub fn supports_images(&self) -> bool {
         self.contains(ModelType::Images)
@@ -86,9 +87,6 @@ impl ModelType {
         }
         if self.supports_tensor() {
             result.push("tensor");
-        }
-        if self.supports_prefill() {
-            result.push("prefill");
         }
         if self.supports_images() {
             result.push("images");
@@ -117,9 +115,6 @@ impl ModelType {
         }
         if self.supports_tensor() {
             result.push(ModelType::TensorBased);
-        }
-        if self.supports_prefill() {
-            result.push(ModelType::Prefill);
         }
         if self.supports_images() {
             result.push(ModelType::Images);

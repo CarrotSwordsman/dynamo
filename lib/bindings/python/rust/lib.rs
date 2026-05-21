@@ -299,13 +299,31 @@ fn register_model<'p>(
     needs: Option<Vec<Vec<WorkerType>>>,
     self_host_metadata: Option<bool>,
 ) -> PyResult<Bound<'p, PyAny>> {
-    // Validate Prefill model type requirements
-    if model_type.inner == llm_rs::model_type::ModelType::Prefill
-        && !matches!(model_input, ModelInput::Tokens)
-    {
+    // Phase-3 strict mode: every worker registers with an explicit
+    // `worker_type`. Reject `None` outright — the old compat shim that
+    // treated `None` as Aggregated has been removed, and a missing role
+    // would otherwise produce a card whose readiness math is undefined
+    // and whose ws_key would collide with other Aggregated workers in
+    // the same namespace.
+    let Some(worker_type_unwrapped) = worker_type else {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "ModelType::Prefill requires model_input to be ModelInput::Tokens",
+            "register_model: `worker_type` is required (Phase 3 of the topology \
+             readiness DEP). Pass one of WorkerType.Prefill / Decode / Encode / \
+             Aggregated.",
         ));
+    };
+
+    // Prefill / Encode workers carry no OpenAI surface; both still expect
+    // Tokens input downstream (engines preprocess externally).
+    if matches!(
+        worker_type_unwrapped,
+        WorkerType::Prefill | WorkerType::Encode
+    ) && !matches!(model_input, ModelInput::Tokens)
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "register_model: worker_type={:?} requires model_input=ModelInput::Tokens",
+            worker_type_unwrapped
+        )));
     }
 
     let model_input = match model_input {
@@ -320,12 +338,12 @@ fn register_model<'p>(
 
     let model_type_obj = model_type.inner;
 
-    // Normalize the topology readiness fields `worker_type` and `needs` for
-    // the MDC. `worker_type = None` and `needs = []` is the pre-strict
-    // default — readers apply the missing-field shim. Backends are expected
-    // to pass explicit values (one of the four `WorkerType` variants and a
-    // DNF `needs` list); enforced strictly in a follow-up.
-    let worker_type_value: Option<llm_rs::worker_type::WorkerType> = worker_type.map(|w| w.into());
+    // Topology readiness fields on the MDC. `worker_type` is required (see
+    // the strict-mode check above); `needs` defaults to an empty DNF (no
+    // peer required), which is correct for Aggregated workers and is also
+    // the safe default for any backend that forgot to wire it.
+    let worker_type_value: Option<llm_rs::worker_type::WorkerType> =
+        Some(worker_type_unwrapped.into());
     let needs_value: Vec<Vec<llm_rs::worker_type::WorkerType>> = needs
         .unwrap_or_default()
         .into_iter()
@@ -588,10 +606,9 @@ impl ModelType {
     const TensorBased: Self = ModelType {
         inner: llm_rs::model_type::ModelType::TensorBased,
     };
-    #[classattr]
-    const Prefill: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Prefill,
-    };
+    // ModelType::Prefill was removed in Phase 3 of the topology readiness
+    // DEP. The prefill role is now expressed via `WorkerType::Prefill`
+    // (orthogonal to ModelType, which only describes OpenAI surface).
     #[classattr]
     const Images: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Images,

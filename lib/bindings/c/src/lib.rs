@@ -1485,10 +1485,13 @@ fn spawn_prefill_discovery_watcher(
                             Err(_) => continue,
                         };
 
-                        if !card.model_type.supports_prefill()
-                            || card.model_type.supports_chat()
-                            || card.model_type.supports_completions()
-                        {
+                        // Phase 3: prefill workers are identified by
+                        // `worker_type`, not `ModelType::Prefill`. The bit
+                        // was removed; check the card's `worker_type` field
+                        // directly. Skip any card that is *not* a Prefill
+                        // worker.
+                        use dynamo_llm::worker_type::WorkerType;
+                        if card.worker_type != Some(WorkerType::Prefill) {
                             continue;
                         }
 
@@ -1549,11 +1552,12 @@ async fn fetch_preprocessor_from_discovery(
             let actual_namespace = namespace.clone();
             match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
-                    // Skip prefill-only workers, we want decode workers for routing
-                    if card.model_type.supports_prefill()
-                        && !card.model_type.supports_chat()
-                        && !card.model_type.supports_completions()
-                    {
+                    // Phase 3: prefill workers are identified by
+                    // `worker_type`, not the (removed) `ModelType::Prefill`
+                    // bit. Skip prefill workers — we want decode workers
+                    // for routing.
+                    use dynamo_llm::worker_type::WorkerType;
+                    if card.worker_type == Some(WorkerType::Prefill) {
                         continue;
                     }
                     model_card = Some((card, actual_namespace));

@@ -250,14 +250,6 @@ impl ModelManager {
             .collect()
     }
 
-    pub fn list_prefill_models(&self) -> Vec<String> {
-        self.models
-            .iter()
-            .filter(|entry| entry.value().has_prefill())
-            .map(|entry| entry.key().clone())
-            .collect()
-    }
-
     pub fn get_embeddings_engine(
         &self,
         model: &str,
@@ -364,9 +356,21 @@ impl ModelManager {
 
     // -- Convenience methods for in-process models (http.rs, grpc.rs) --
     // These create a WorkerSet with a default namespace for local models.
+    // Synthetic in-process worker sets are always `Aggregated` (they own
+    // their engine inline and don't depend on a peer worker), so we stamp
+    // that role onto the card here. The `Prefill` helper, in contrast,
+    // tags itself with `WorkerType::Prefill` so topology readiness math
+    // sees it correctly.
     // TODO: These methods use ModelDeploymentCard::default() for the WorkerSet, which means
     // parsing_options() returns defaults (no tool_call_parser/reasoning_parser). Pass the real
     // MDC from callers so ParsingOptions reflect the model's actual configuration.
+
+    fn aggregated_local_card() -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.needs = Vec::new();
+        card
+    }
 
     pub fn add_chat_completions_model(
         &self,
@@ -382,7 +386,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.chat_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -403,7 +407,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.completions_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -424,7 +428,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.embeddings_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -445,7 +449,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.tensor_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -466,7 +470,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.images_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -487,7 +491,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.videos_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -508,7 +512,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.audios_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -525,11 +529,10 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_prefill_{}", model);
-        let ws = WorkerSet::new(
-            namespace.clone(),
-            card_checksum.to_string(),
-            ModelDeploymentCard::default(),
-        );
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Prefill);
+        card.needs = vec![vec![crate::worker_type::WorkerType::Decode]];
+        let ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
@@ -1151,18 +1154,6 @@ mod tests {
     fn test_model_display_names_empty() {
         let mm = ModelManager::new();
         assert!(mm.model_display_names().is_empty());
-    }
-
-    #[test]
-    fn test_list_prefill_models() {
-        let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
-        mm.add_worker_set("gpt", "ns1", make_worker_set("ns1", "def"));
-
-        let prefill = mm.list_prefill_models();
-        assert_eq!(prefill.len(), 2);
-        assert!(prefill.contains(&"llama".to_string()));
-        assert!(prefill.contains(&"gpt".to_string()));
     }
 
     // -- Model card tests --

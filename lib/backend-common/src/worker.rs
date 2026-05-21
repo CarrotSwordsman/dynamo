@@ -723,12 +723,13 @@ fn resolve_served_name(config: &WorkerConfig, engine_config: &EngineConfig) -> O
 }
 
 /// Pick the `ModelType` to register with based on the worker's disaggregation
-/// role. `DisaggregationMode::Prefill` short-circuits to `ModelType::Prefill`
-/// regardless of `endpoint_types`; everything else falls back to the parsed
-/// `endpoint_types` so existing callers see no change.
+/// role. After Phase 3 the prefill role is carried by `worker_type` rather
+/// than `ModelType::Prefill`, so prefill workers register with
+/// `ModelType::empty()` — no OpenAI surface exposed. Everything else falls
+/// back to the parsed `endpoint_types`.
 fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
     if config.disaggregation_mode.is_prefill() {
-        return Ok(ModelType::Prefill);
+        return Ok(ModelType::empty());
     }
     parse_endpoint_types(&config.endpoint_types)
 }
@@ -757,7 +758,11 @@ fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
             "completions" => ModelType::Completions,
             "embedding" | "embeddings" => ModelType::Embedding,
             "tensor" => ModelType::TensorBased,
-            "prefill" => ModelType::Prefill,
+            // "prefill" used to map to ModelType::Prefill; that bit was
+            // removed in Phase 3 of the topology readiness DEP. The prefill
+            // role is now declared via `worker_type` instead and is
+            // expressed at the disaggregation-mode level. Treat "prefill"
+            // as an invalid endpoint type — it never made sense as one.
             other => {
                 return Err(err(
                     ErrorType::Backend(BackendError::InvalidArgument),
@@ -1020,16 +1025,18 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_type_prefill_overrides_endpoint_types() {
+    fn resolve_model_type_prefill_uses_empty_model_type() {
         // The operator may have left endpoint_types at the default
         // "chat,completions"; --disaggregation-mode prefill forces the
-        // registration to ModelType::Prefill regardless.
+        // ModelType to empty (no OpenAI surface) — the prefill role is
+        // declared on `worker_type` instead. Phase 3 of the topology
+        // readiness DEP.
         let config = WorkerConfig {
             endpoint_types: "chat,completions".to_string(),
             disaggregation_mode: DisaggregationMode::Prefill,
             ..WorkerConfig::default()
         };
-        assert_eq!(resolve_model_type(&config).unwrap(), ModelType::Prefill);
+        assert_eq!(resolve_model_type(&config).unwrap(), ModelType::empty());
     }
 
     #[tokio::test]

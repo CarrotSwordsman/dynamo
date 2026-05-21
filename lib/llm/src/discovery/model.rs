@@ -167,12 +167,13 @@ impl Model {
     // worker types currently present in the topology (workers with
     // worker_count > 0).
     //
-    // The design target is that every worker registers an explicit
-    // `worker_type` and `needs`. A temporary shim in [`ws_role_and_needs`]
-    // reads `worker_type = None` as `Aggregated` with no `needs` so that the
-    // frontend can keep serving existing deployments while backends are
-    // being updated. The shim is removed once backend-side registration is
-    // strict; see `docs/proposals/health-disagg-readiness.md` (Phase 3).
+    // Every worker is expected to register an explicit `worker_type` and
+    // `needs`. There used to be a compat shim that read `worker_type = None`
+    // as `Aggregated`; it's been removed in Phase 3 of the topology
+    // readiness DEP — strict registration (`register_model` rejects
+    // non-canonical worker_type) plus updated backend wiring means a
+    // missing field now means the worker is genuinely misconfigured and
+    // should *not* count toward readiness.
 
     /// Distinct namespaces represented by this model's WorkerSets, sorted.
     /// Each namespace identifies one topology in the model.
@@ -187,35 +188,26 @@ impl Model {
         ns
     }
 
-    /// Return `(worker_type, needs)` for this WorkerSet, applying the
-    /// temporary missing-field shim.
-    ///
-    /// TEMPORARY: contains a shim for `worker_type = None`, removed once
-    /// every backend registers explicit values.
+    /// Return `(worker_type, needs)` for this WorkerSet, or `None` if the
+    /// card has no declared `worker_type`. A `None` here means
+    /// "misconfigured worker"; topology readiness treats it as missing.
     fn ws_role_and_needs(
         ws: &WorkerSet,
-    ) -> (
+    ) -> Option<(
         crate::worker_type::WorkerType,
         Vec<Vec<crate::worker_type::WorkerType>>,
-    ) {
+    )> {
         let card = ws.card();
-        match card.worker_type {
-            Some(wt) => (wt, card.needs.clone()),
-            None => {
-                // TEMPORARY shim: missing worker_type → treat as Aggregated
-                // with no peer needs. Removed when backend-side registration
-                // is strict and missing means "misconfigured".
-                (crate::worker_type::WorkerType::Aggregated, Vec::new())
-            }
-        }
+        card.worker_type.map(|wt| (wt, card.needs.clone()))
     }
 
     /// Whether the workers in the given namespace are ready to serve traffic.
     ///
     /// Iterates the WorkerSets sharing this namespace and checks that every
     /// WorkerSet's `needs` (DNF) has at least one alternative fully covered
-    /// by the present worker types. Returns false for an unknown namespace
-    /// or one with no WorkerSets.
+    /// by the present worker types. Returns false for an unknown namespace,
+    /// for one with no WorkerSets, or for one that contains a misconfigured
+    /// worker (card with no declared `worker_type`).
     pub fn is_workers_ready(&self, namespace: &str) -> bool {
         let mut present: std::collections::HashSet<crate::worker_type::WorkerType> =
             std::collections::HashSet::new();
@@ -225,7 +217,12 @@ impl Model {
             if ws.namespace() != namespace {
                 continue;
             }
-            let (wt, _needs) = Self::ws_role_and_needs(ws);
+            // A misconfigured card (no `worker_type` declared) makes the
+            // whole topology not-ready: we can't tell what role it plays,
+            // so we refuse to vouch for the namespace.
+            let Some((wt, _needs)) = Self::ws_role_and_needs(ws) else {
+                return false;
+            };
             if ws.worker_count() > 0 {
                 present.insert(wt);
             }
@@ -237,7 +234,9 @@ impl Model {
         // Every WorkerSet's needs (DNF) must have at least one alternative
         // (AND-set) fully present.
         for ws in &wsets {
-            let (_wt, needs) = Self::ws_role_and_needs(ws);
+            let Some((_wt, needs)) = Self::ws_role_and_needs(ws) else {
+                return false;
+            };
             if needs.is_empty() {
                 continue;
             }
@@ -834,8 +833,8 @@ mod tests {
     // These tests exercise the live-compute readiness methods on `Model`.
     // They construct WorkerSets with specific `worker_type` / `needs` values
     // on their cards and verify DNF readiness math, including the encode
-    // worker's two-alternative needs and the temporary missing-field shim
-    // in `ws_role_and_needs`.
+    // worker's two-alternative needs and the strict-mode behavior for
+    // cards with no declared `worker_type`.
 
     use crate::worker_type::WorkerType;
 
@@ -1049,17 +1048,19 @@ mod tests {
     }
 
     #[test]
-    fn readiness_missing_worker_type_field_treated_as_aggregated() {
-        // TEMPORARY: verifies the shim in `ws_role_and_needs` that maps a
-        // missing worker_type (None) to Aggregated with no needs while
-        // backends are being updated to populate the field. This test (and
-        // the shim itself) are removed once every worker registers an
-        // explicit worker_type.
+    fn readiness_missing_worker_type_field_is_not_ready() {
+        // Phase 3 removed the compat shim that treated `worker_type = None`
+        // as Aggregated. A card with no declared `worker_type` is now
+        // considered misconfigured, and topology readiness must refuse to
+        // call the namespace ready — otherwise a broken backend
+        // registration would silently pass the gate.
         let model = Model::new("llama".to_string());
-        // Default card → worker_type is None.
-        let (_ws, _tx) = make_worker_set_with_count("dynamo", "mdc-agg", vec![1]);
+        let (_ws, _tx) = make_worker_set_with_count("dynamo", "mdc-default", vec![1]);
         model.add_worker_set("dynamo".to_string(), _ws);
 
-        assert!(model.is_workers_ready("dynamo"));
+        assert!(
+            !model.is_workers_ready("dynamo"),
+            "a worker set with no worker_type must NOT be considered ready"
+        );
     }
 }

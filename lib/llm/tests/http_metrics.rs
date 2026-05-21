@@ -415,7 +415,7 @@ mod integration_tests {
                 dynamo_llm::model_type::ModelType::Chat,
                 dynamo_llm::model_type::ModelInput::Text,
                 None,
-                None,
+                Some(dynamo_llm::worker_type::WorkerType::Aggregated),
                 Vec::new(),
             )
             .await

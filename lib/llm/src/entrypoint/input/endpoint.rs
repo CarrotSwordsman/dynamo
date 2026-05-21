@@ -14,6 +14,7 @@ use crate::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         },
     },
+    worker_type::WorkerType,
 };
 
 use dynamo_runtime::engine::AsyncEngineStream;
@@ -44,13 +45,15 @@ pub async fn run(
                 Context<NvCreateChatCompletionRequest>,
                 Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
             >::for_engine(engine)?;
+            // In-process engines are always Aggregated: they own the full
+            // serving stack inline and don't depend on a peer worker.
             model
                 .attach(
                     &endpoint,
                     ModelType::Chat,
                     ModelInput::Text,
                     None,
-                    None,
+                    Some(WorkerType::Aggregated),
                     Vec::new(),
                 )
                 .await?;
@@ -77,10 +80,21 @@ pub async fn run(
                 .link(frontend)?;
             let ingress = Ingress::for_pipeline(pipeline)?;
 
-            let model_type = if is_prefill {
-                ModelType::Prefill
+            // After Phase 3 the prefill role is carried by `worker_type`, not
+            // `model_type`. Prefill workers register with an empty
+            // `model_type` (no OpenAI surface) and `WorkerType::Prefill`.
+            let (model_type, worker_type, needs) = if is_prefill {
+                (
+                    ModelType::empty(),
+                    Some(WorkerType::Prefill),
+                    vec![vec![WorkerType::Decode]],
+                )
             } else {
-                ModelType::Chat | ModelType::Completions
+                (
+                    ModelType::Chat | ModelType::Completions,
+                    Some(WorkerType::Aggregated),
+                    Vec::new(),
+                )
             };
             model
                 .attach(
@@ -88,8 +102,8 @@ pub async fn run(
                     model_type,
                     ModelInput::Tokens,
                     None,
-                    None,
-                    Vec::new(),
+                    worker_type,
+                    needs,
                 )
                 .await?;
 

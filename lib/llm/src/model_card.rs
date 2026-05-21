@@ -686,12 +686,13 @@ pub struct ModelDeploymentCard {
     /// Processing stage this worker handles (Prefill, Decode, Encode, Aggregated).
     /// Orthogonal to `model_type` (which describes endpoints exposed).
     ///
-    /// Every worker is expected to set this explicitly; `None` means the
-    /// worker has not declared a role and is treated as misconfiguration
-    /// (workers not ready). A temporary shim in `Model::ws_role_and_needs`
-    /// softens this while backends are being migrated — see
-    /// `docs/proposals/health-disagg-readiness.md`. `#[serde(default)]` is
-    /// kept so pre-field cards still deserialize.
+    /// Every worker is expected to set this explicitly. `None` means the
+    /// worker has not declared a role and is treated as misconfiguration:
+    /// `Model::ws_role_and_needs` returns `None`, topology readiness refuses
+    /// to vouch for the namespace, and (Phase 3) `register_model` rejects
+    /// such cards outright. The `Option<>` type and `#[serde(default)]` are
+    /// kept so pre-field cards still deserialize, but downstream readers
+    /// treat them as not-ready. See `docs/proposals/health-disagg-readiness.md`.
     #[serde(default)]
     pub worker_type: Option<crate::worker_type::WorkerType>,
 
