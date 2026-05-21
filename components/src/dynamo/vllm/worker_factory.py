@@ -21,7 +21,7 @@ from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
 )
-from dynamo.llm import ModelInput, ModelType, WorkerType
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 
 from .args import Config
@@ -179,6 +179,24 @@ class WorkerFactory:
             config.engine_args, config.embedding_transfer_mode  # type: ignore[arg-type]
         )
         await handler.async_init(runtime)
+
+        # Phase 3: encode workers now register a model card so the frontend's
+        # topology readiness can count them. The card carries no OpenAI
+        # surface (`ModelType()` is empty) — the encode endpoint isn't routed
+        # by the OpenAI dispatch. `needs` is the DNF for an encode worker:
+        # either a P+D pair or a single Aggregated peer.
+        await register_model(
+            ModelInput.Tokens,
+            ModelType(),
+            generate_endpoint,
+            config.model,
+            model_name=config.served_model_name or config.model,
+            worker_type=WorkerType.Encode,
+            needs=[
+                [WorkerType.Prefill, WorkerType.Decode],
+                [WorkerType.Aggregated],
+            ],
+        )
         logger.info("Starting to serve the encode worker endpoint...")
 
         try:
@@ -397,8 +415,9 @@ class WorkerFactory:
 
         # Topology readiness role.
         # _create_decode_worker handles both DECODE and AGGREGATED disaggregation modes.
-        # Encode is omitted from `needs` until encode workers register a card —
-        # advertising it now would leave route-to-encoder deployments perma-not-ready.
+        # `--route-to-encoder` adds Encode to the AND-set of required peers;
+        # Phase 3 turns this back on (encode workers register their own card
+        # in `_create_multimodal_encode_worker`).
         if config.disaggregation_mode == DisaggregationMode.DECODE:
             worker_type = WorkerType.Decode
             needs_set: list[WorkerType] = [WorkerType.Prefill]
@@ -406,6 +425,8 @@ class WorkerFactory:
             # AGGREGATED
             worker_type = WorkerType.Aggregated
             needs_set = []
+        if config.route_to_encoder:
+            needs_set.append(WorkerType.Encode)
         needs: list[list[WorkerType]] = [needs_set] if needs_set else []
 
         await self.register_vllm_model(
@@ -611,21 +632,24 @@ class WorkerFactory:
         )
         shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, perf_endpoint]
 
-        # Register prefill model with ModelType.Prefill (the legacy bit that
-        # gates prefill-side routing) and the topology readiness role. Encode
-        # is omitted from `needs` until encode workers register a card.
+        # Phase 3: prefill workers register with empty ModelType (no OpenAI
+        # surface — the prefill role is carried by `worker_type=Prefill`).
+        # When --route-to-encoder is set, Encode joins the AND-set of needs.
         model_input = (
             ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
         )
+        prefill_needs_set: list[WorkerType] = [WorkerType.Decode]
+        if config.route_to_encoder:
+            prefill_needs_set.append(WorkerType.Encode)
         await self.register_vllm_model(
             model_input,
-            ModelType.Prefill,
+            ModelType(),
             generate_endpoint,
             config,
             engine_client,
             vllm_config,
             worker_type=WorkerType.Prefill,
-            needs=[[WorkerType.Decode]],
+            needs=[prefill_needs_set],
         )
 
         health_check_payload = VllmPrefillHealthCheckPayload(

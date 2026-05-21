@@ -184,6 +184,22 @@ impl ErrorMessage {
         )
     }
 
+    /// Service Unavailable with a structured message body. Used by Phase 3
+    /// topology readiness to distinguish "model registered but topology
+    /// incomplete" from generic "service not ready".
+    pub fn service_unavailable_with_body(message: String) -> ErrorResponse {
+        let code = StatusCode::SERVICE_UNAVAILABLE;
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message,
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
+    }
+
     /// Internal Service Error
     /// Return this error when the service encounters an internal error.
     /// We should return a generic message to the client instead of the real error.
@@ -425,8 +441,9 @@ async fn handler_completions(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service or per-model topology is not ready
     check_ready(&state)?;
+    check_topology_ready(&state, &request.inner.model)?;
 
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
@@ -824,8 +841,9 @@ async fn embeddings(
     headers: HeaderMap,
     Json(request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service or per-model topology is not ready
     check_ready(&state)?;
+    check_topology_ready(&state, &request.inner.model)?;
 
     let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
@@ -907,8 +925,11 @@ async fn handler_chat_completions(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateChatCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service is not ready (process-level + per-model
+    // topology readiness). Phase 3: an aggregated request to a decode-only
+    // namespace would otherwise hang/crash on the decode worker.
     check_ready(&state)?;
+    check_topology_ready(&state, &request.inner.model)?;
 
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
@@ -1524,8 +1545,11 @@ async fn handler_responses(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateResponse>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service or per-model topology is not ready
     check_ready(&state)?;
+    if let Some(ref model) = request.inner.model {
+        check_topology_ready(&state, model)?;
+    }
 
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
@@ -1906,6 +1930,37 @@ pub(crate) fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorRe
     Ok(())
 }
 
+/// Per-model topology readiness gate. Phase 3 of the topology readiness DEP.
+///
+/// Composes AND-wise with [`check_ready`]: a request is admitted only when
+/// (a) the process is ready (`check_ready`) AND (b) at least one namespace
+/// for this specific model has a complete worker topology — every worker's
+/// `needs` DNF is satisfied by the worker types currently present in that
+/// namespace.
+///
+/// Returns `503 Service Unavailable` with a structured body when the model
+/// isn't topology-ready. Models the frontend has never heard of fall through
+/// here; the per-handler engine lookup later in the request path returns a
+/// 404 instead, which is the right shape for "unknown model".
+pub(crate) fn check_topology_ready(
+    state: &Arc<service_v2::State>,
+    model_name: &str,
+) -> Result<(), ErrorResponse> {
+    let Some(model) = state.manager().get_model(model_name) else {
+        // Unknown model — let the per-endpoint engine accessor produce the
+        // canonical 404. Topology readiness has nothing to say.
+        return Ok(());
+    };
+    if model.has_ready_workers() {
+        return Ok(());
+    }
+    Err(ErrorMessage::service_unavailable_with_body(format!(
+        "Model `{model_name}` is registered but no namespace has a complete worker topology. \
+         At least one prefill/decode/encode role required by a registered worker is missing. \
+         Check worker startup logs for the affected namespace."
+    )))
+}
+
 /// openai compatible format
 /// Example:
 /// {
@@ -1948,6 +2003,16 @@ async fn list_models_openai(
 
     let models: HashSet<String> = state.manager().model_display_names();
     for model_name in models {
+        // Phase 3: only list models whose worker topology is complete in at
+        // least one namespace. A registered-but-broken deployment (e.g.
+        // decode-only with no prefill peer) is hidden until a peer joins.
+        let topology_ready = state
+            .manager()
+            .get_model(&model_name)
+            .is_some_and(|m| m.has_ready_workers());
+        if !topology_ready {
+            continue;
+        }
         let context_window = cw_override.or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
         data.push(ModelListing {
             id: model_name.clone(),
@@ -2069,6 +2134,10 @@ async fn get_model_openai(
         return Err(ErrorMessage::model_not_found());
     }
 
+    // Phase 3: GET /v1/models/{model} reports the model only if its
+    // topology is ready. Mirrors the filter applied in list_models_openai.
+    check_topology_ready(&state, model_id)?;
+
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -2121,6 +2190,8 @@ async fn images(
     Json(request): Json<NvCreateImageRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
+    // (per-model topology check is deferred until after we resolve the
+    // ImageModel enum into a string; see below)
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
@@ -2144,6 +2215,10 @@ async fn images(
             dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
         })
         .unwrap_or_else(|| "diffusion".to_string());
+
+    // Phase 3: per-model topology readiness gate (now that we have a
+    // resolved model name string).
+    check_topology_ready(&state, &model)?;
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
@@ -2250,8 +2325,9 @@ async fn videos(
     headers: HeaderMap,
     Json(request): Json<NvCreateVideoRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service or per-model topology is not ready
     check_ready(&state)?;
+    check_topology_ready(&state, &request.model)?;
 
     let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
@@ -2371,6 +2447,7 @@ async fn video_stream(
     Json(request): Json<NvCreateVideoRequest>,
 ) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
+    check_topology_ready(&state, &request.model)?;
 
     let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
@@ -2533,6 +2610,8 @@ async fn audio_speech(
     Json(request): Json<NvCreateAudioSpeechRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
+    // (per-model topology check is deferred until after we resolve the
+    // Option<String> model field; see below)
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
@@ -2550,6 +2629,10 @@ async fn audio_speech(
             .next()
             .unwrap_or_default()
     });
+
+    // Phase 3: per-model topology readiness gate (now that we have a
+    // resolved model name string).
+    check_topology_ready(&state, &model)?;
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 

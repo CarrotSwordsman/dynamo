@@ -10,7 +10,7 @@ import sglang as sgl
 from dynamo import prometheus_names
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.prometheus import register_embedding_cache_metrics
-from dynamo.llm import ModelInput
+from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
@@ -76,7 +76,16 @@ async def init_multimodal_encode_worker(
                 server_args,
                 dynamo_args,
                 input_type=ModelInput.Tokens,
+                # Phase 3: encode workers carry no OpenAI surface; the role
+                # is declared via `worker_type=Encode` below. Needs DNF: a
+                # P+D pair OR a single Aggregated peer.
+                output_type=ModelType(),
                 readiness_gate=ready_event,
+                worker_type=WorkerType.Encode,
+                needs=[
+                    [WorkerType.Prefill, WorkerType.Decode],
+                    [WorkerType.Aggregated],
+                ],
             ),
         )
     except Exception as e:

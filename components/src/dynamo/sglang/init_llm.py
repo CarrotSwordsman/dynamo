@@ -302,7 +302,9 @@ async def init_prefill(
                 server_args,
                 dynamo_args,
                 input_type=ModelInput.Tokens,
-                output_type=ModelType.Prefill,
+                # Phase 3: prefill workers have no OpenAI surface — the role
+                # is carried by `worker_type=Prefill` below. Empty ModelType.
+                output_type=ModelType(),
                 readiness_gate=ready_event,
                 worker_type=WorkerType.Prefill,
                 needs=[[WorkerType.Decode]],

@@ -608,7 +608,9 @@ async def register_vllm_model(
 
     Args:
         model_input: Input type for the model (e.g., ModelInput.Tokens)
-        model_type: Type of model (e.g., ModelType.Chat, ModelType.Prefill)
+        model_type: OpenAI surface this card exposes (e.g., ModelType.Chat).
+            Prefill workers pass `ModelType()` — they have no OpenAI surface,
+            their role is carried by `worker_type=WorkerType.Prefill`.
         generate_endpoint: Endpoint to register
         config: Configuration object
         engine_client: vLLM engine client
@@ -650,8 +652,10 @@ async def register_vllm_model(
         and config.disaggregation_mode != DisaggregationMode.DECODE
     )
 
-    # Add tool/reasoning parsers for decode models
-    if model_type != ModelType.Prefill:
+    # Add tool/reasoning parsers for decode/aggregated workers. Prefill
+    # workers have no OpenAI surface and don't run a parser — Phase 3 keys
+    # this off `worker_type` since `ModelType.Prefill` no longer exists.
+    if worker_type != WorkerType.Prefill:
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
     runtime_config.exclude_tools_when_tool_choice_none = (
